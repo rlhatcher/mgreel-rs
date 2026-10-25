@@ -1,0 +1,22 @@
+[package]
+name = "mgreel-rs"
+version = "1.0.0"
+edition = "2021"
+authors = ["rlhatcher <ronaldhatcher@mac.com>"]
+license = "ISC"
+description = "Convert Wave files to Make Noise Morphagene reel format (Rust port)"
+repository = "https://github.com/rlhatcher/mgreel-rs"
+keywords = ["audio", "wav", "morphagene", "eurorack", "music"]
+categories = ["command-line-utilities", "multimedia::audio"]
+readme = "README.md"
+
+[[bin]]
+name = "mgreel"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+hound = "3.5"
+rubato = "0.15"
+anyhow = "1.0"
+

@@ -1,0 +1,21 @@
+# Rust
+/target/
+
+# Node.js (for original version)
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+*.wav
+!test/*.wav
+
