@@ -186,8 +186,9 @@ export const exportSplices = (
   last: number,
   dir: string,
 ) => invoke<string[]>("export_splices", { root, index, markers, first, last, dir });
-export const seekHistory = async (root: string, index: number, pos: number) =>
-  parseEdit(await invoke<ArrayBuffer>("seek_history", { root, index, pos }));
+/** Undo or redo to `pos`, which must still hold audio state `state`. */
+export const seekHistory = async (root: string, index: number, pos: number, state: number) =>
+  parseEdit(await invoke<ArrayBuffer>("seek_history", { root, index, pos, state }));
 export type SliceMode = "phrases" | "gestures";
 export const autoSlice = (
   root: string,
