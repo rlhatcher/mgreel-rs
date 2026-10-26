@@ -19,6 +19,8 @@
   let tab = $state<Tab>("library");
   let editing = $state<number | null>(null);
   let editorDirty = $state(false);
+  /** The open card has gone from /Volumes. */
+  let cardMissing = $state(false);
   let buildTarget = $state<number | null>(null);
   let status = $state({ text: "", error: false });
   let statusTimer: ReturnType<typeof setTimeout> | undefined;
@@ -37,14 +39,32 @@
     } catch (e) {
       notify(errorText(e), true);
     }
-    if (root && !allCards.some((c) => c.root === root)) {
+    cardMissing = root !== null && !allCards.some((c) => c.root === root);
+    if (cardMissing && holdingEdits) {
+      notify("The card was removed. Put it back to save your marker changes.", true);
+    } else {
+      dropMissingCard();
+    }
+  }
+
+  // Unsaved marker edits keep a removed card open, so reinserting it lets
+  // them be saved. Once the edits are saved, reverted or discarded, close it.
+  const holdingEdits = $derived(tab === "editor" && editorDirty);
+
+  function dropMissingCard() {
+    if (cardMissing) {
       notify("The card was removed.", true);
+      cardMissing = false;
       root = null;
       editing = null;
       tab = "library";
     }
     if (!root && allCards.length) root = allCards[0].root;
   }
+
+  $effect(() => {
+    if (cardMissing && !holdingEdits) dropMissingCard();
+  });
 
   async function refreshSlots() {
     slots = root ? await listSlots(root) : [];
@@ -88,6 +108,7 @@
   }
 
   function switchTo(next: string) {
+    cardMissing = false;
     root = next;
     editing = null;
     if (tab === "editor") tab = "library";
