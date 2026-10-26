@@ -228,6 +228,7 @@
     stop();
     const { left, right } = applySpans(reel.left, reel.right, r.spans);
     reel = { ...reel, left, right };
+    cursor = Math.min(cursor, Math.max(0, left.length - 1));
     preview?.close();
     preview = makePreview(reel);
   }
@@ -717,11 +718,12 @@
     // WAV files dropped on the editor go in as new splices after the pick.
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
       const p = event.payload;
-      if (p.type === "enter" || p.type === "over") dropping = true;
+      // Drags inside the page, such as reordering splices, carry no paths.
+      if (p.type === "enter") dropping = p.paths.length > 0;
       else if (p.type === "leave") dropping = false;
       else if (p.type === "drop") {
         dropping = false;
-        addFiles(p.paths);
+        if (p.paths.length) addFiles(p.paths);
       }
     });
     return () => {
