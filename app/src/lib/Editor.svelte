@@ -193,14 +193,18 @@
   }
 
   async function save() {
-    if (!reel) return;
+    // One save at a time: two would write the same temp file on the card.
+    if (!reel || saving) return;
     saving = true;
+    // Edits made while the save runs stay unsaved.
+    const loaded = reel;
+    const sent = markers.slice();
     try {
-      const updated = await saveMarkers(root, slot.index, markers, reel.audioId);
-      reel.audioId = updated.audioId;
-      saved = markers.slice();
+      const updated = await saveMarkers(root, slot.index, sent, loaded.audioId);
+      loaded.audioId = updated.audioId;
+      saved = sent;
       onsaved(updated.slot);
-      notify(`Saved ${markers.length + 1} splices to ${slot.fileName}`);
+      notify(`Saved ${sent.length + 1} splices to ${slot.fileName}`);
     } catch (e) {
       notify(errorText(e), true);
     } finally {

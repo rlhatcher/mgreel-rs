@@ -306,7 +306,10 @@ impl ReelFile {
     pub fn audio_id(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
         for id in [b"fmt ", b"data"] {
-            hasher.write(self.chunk(id).map_or(&[][..], |c| &c.data));
+            // The length keeps a byte from counting toward either chunk.
+            let data = self.chunk(id).map_or(&[][..], |c| &c.data);
+            hasher.write_u64(data.len() as u64);
+            hasher.write(data);
         }
         hasher.finish()
     }
