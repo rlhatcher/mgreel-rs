@@ -3,6 +3,7 @@
   // marker to move it, double-click to add one. Locked markers don't move.
   // Pinch or Cmd-scroll zooms, horizontal scroll pans.
   import { onMount, untrack } from "svelte";
+  import { spectrogram } from "./spectrum";
 
   type Props = {
     left: Float32Array;
@@ -13,6 +14,8 @@
     selectedMarker: number | null;
     /** Frames of markers that can't be moved. */
     locked: ReadonlySet<number>;
+    /** Draw a spectrogram instead of the waveform. */
+    spectrum: boolean;
     onseek?: (frame: number) => void;
     /** Double-click asks for a marker here; the parent adds it. */
     onadd: (frame: number) => void;
@@ -29,6 +32,7 @@
     playhead,
     selectedMarker = $bindable(),
     locked,
+    spectrum,
     onseek,
     onadd,
     ondragstart,
@@ -124,6 +128,46 @@
     return [lo, hi];
   }
 
+  /** Spectrogram rows. Columns are every second pixel; drawing scales them up. */
+  const SPEC_ROWS = 160;
+  let specCache: { key: string; left: Float32Array; image: HTMLCanvasElement } | null = null;
+
+  /** A CSS color as RGB numbers. */
+  function rgb(color: string): [number, number, number] {
+    const c = document.createElement("canvas").getContext("2d")!;
+    c.fillStyle = color;
+    const v = c.fillStyle as string;
+    if (v.startsWith("#")) return [1, 3, 5].map((i) => parseInt(v.slice(i, i + 2), 16)) as [number, number, number];
+    const n = v.match(/[\d.]+/g)!.map(Number);
+    return [n[0], n[1], n[2]];
+  }
+
+  function spectrumImage(color: (name: string) => string) {
+    const columns = Math.max(1, Math.ceil(width / 2));
+    const stops = [rgb(color("--panel")), rgb(color("--accent")), rgb(color("--text"))];
+    const key = `${viewStart}:${viewEnd}:${columns}:${stops.join()}`;
+    if (specCache && specCache.key === key && specCache.left === left) return specCache.image;
+    const levels = spectrogram(left, right, viewStart, viewEnd, columns, SPEC_ROWS);
+    const image = document.createElement("canvas");
+    image.width = columns;
+    image.height = SPEC_ROWS;
+    const ictx = image.getContext("2d")!;
+    const data = ictx.createImageData(columns, SPEC_ROWS);
+    for (let c = 0; c < columns; c++) {
+      for (let r = 0; r < SPEC_ROWS; r++) {
+        const v = levels[c * SPEC_ROWS + r];
+        // Background to accent over the lower 70%, then accent to text.
+        const [a, b, t] = v < 0.7 ? [stops[0], stops[1], v / 0.7] : [stops[1], stops[2], (v - 0.7) / 0.3];
+        const i = ((SPEC_ROWS - 1 - r) * columns + c) * 4;
+        for (let k = 0; k < 3; k++) data.data[i + k] = a[k] + (b[k] - a[k]) * t;
+        data.data[i + 3] = 255;
+      }
+    }
+    ictx.putImageData(data, 0, 0);
+    specCache = { key, left, image };
+    return image;
+  }
+
   function draw() {
     if (!canvas) return;
     const dpr = window.devicePixelRatio || 1;
@@ -138,7 +182,10 @@
     ctx.fillStyle = color("--panel");
     ctx.fillRect(0, 0, width, HEIGHT);
 
-    // Shade alternate splices and highlight the one under the cursor.
+    if (spectrum) ctx.drawImage(spectrumImage(color), 0, 0, width, HEIGHT);
+
+    // Shade alternate splices and highlight the one under the cursor. Over
+    // a spectrogram only the highlight shows, as a tint.
     const starts = [0, ...markers];
     starts.forEach((s, i) => {
       const e = starts[i + 1] ?? frames;
@@ -148,25 +195,26 @@
       if (cursor >= s && cursor < e) {
         ctx.fillStyle = color("--select");
         ctx.fillRect(x0, 0, x1 - x0, HEIGHT);
-      } else if (i % 2 === 1) {
+      } else if (i % 2 === 1 && !spectrum) {
         ctx.fillStyle = color("--panel-2");
         ctx.fillRect(x0, 0, x1 - x0, HEIGHT);
       }
     });
 
-    ctx.fillStyle = color("--wave");
-    const fpp = (viewEnd - viewStart) / width;
-    for (let x = 0; x < width; x++) {
-      const f0 = viewStart + x * fpp;
-      if (f0 >= frames) break;
-      const [lo, hi] = columnRange(f0, f0 + fpp);
-      const top = mid - hi * (mid - 4);
-      const bottom = mid - lo * (mid - 4);
-      ctx.fillRect(x, top, 1, Math.max(1, bottom - top));
+    if (!spectrum) {
+      ctx.fillStyle = color("--wave");
+      const fpp = (viewEnd - viewStart) / width;
+      for (let x = 0; x < width; x++) {
+        const f0 = viewStart + x * fpp;
+        if (f0 >= frames) break;
+        const [lo, hi] = columnRange(f0, f0 + fpp);
+        const top = mid - hi * (mid - 4);
+        const bottom = mid - lo * (mid - 4);
+        ctx.fillRect(x, top, 1, Math.max(1, bottom - top));
+      }
+      ctx.fillStyle = color("--wave-dim");
+      ctx.fillRect(0, mid, width, 0.5);
     }
-
-    ctx.fillStyle = color("--wave-dim");
-    ctx.fillRect(0, mid, width, 0.5);
 
     markers.forEach((m, i) => {
       const x = Math.round(toX(m)) + 0.5;
@@ -201,7 +249,7 @@
   let frame = 0;
   $effect(() => {
     // Track everything draw() reads.
-    void [width, viewStart, viewEnd, markers.length, ...markers, cursor, playhead, selectedMarker, blocks, locked];
+    void [width, viewStart, viewEnd, markers.length, ...markers, cursor, playhead, selectedMarker, blocks, locked, spectrum];
     cancelAnimationFrame(frame);
     frame = requestAnimationFrame(draw);
   });

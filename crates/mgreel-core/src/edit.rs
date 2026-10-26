@@ -1,7 +1,7 @@
 //! Editing a reel's audio splice by splice. Every edit replaces one stretch
 //! of audio, and undo keeps only that stretch, before and after.
 
-use crate::reel::{splice_ranges, SAMPLE_RATE};
+use crate::reel::{resample_by, splice_ranges, SAMPLE_RATE};
 use crate::slice::Biquad;
 use anyhow::{bail, Result};
 use std::ops::Range;
@@ -128,6 +128,9 @@ pub enum Op {
     SmoothLoopMs(f32),
     RemoveDc,
     HighPassHz(f32),
+    /// Change speed like tape: pitch and length together. +12 is twice as
+    /// fast, an octave up and half as long.
+    SpeedSemitones(f32),
 }
 
 /// A reel's audio being edited, with its undo history.
@@ -289,6 +292,22 @@ impl Session {
             Op::MatchLevels => {
                 let pieces: Vec<Stereo> = selected().collect();
                 (first, last + 1, match_levels(pieces))
+            }
+            Op::SpeedSemitones(st) => {
+                let ratio = 2f64.powf(-(st.clamp(-36.0, 36.0) as f64) / 12.0);
+                let pieces = selected()
+                    .map(|s| -> Result<Stereo> {
+                        // Keep at least one frame, so the splice stays.
+                        let mut left = resample_by(&s.left, ratio)?;
+                        let mut right = resample_by(&s.right, ratio)?;
+                        if left.is_empty() {
+                            left.push(0.0);
+                            right.push(0.0);
+                        }
+                        Ok(Stereo::new(left, right))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                (first, last + 1, pieces)
             }
             Op::HighPassHz(hz) => {
                 // One pass over the whole selection, so the filter state runs
@@ -716,6 +735,25 @@ mod tests {
         assert!(s.left[479] < 0.01);
         transform(&mut s, Op::NormalizeDb(-6.0));
         assert!((s.peak() - db(-6.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn speed_changes_length_and_pitch_together() {
+        // One second of 1 kHz.
+        let tone: Vec<f32> = (0..48_000)
+            .map(|i| (std::f32::consts::TAU * 1000.0 * i as f32 / 48_000.0).sin() * 0.5)
+            .collect();
+        let mut s = Session::new(Stereo::new(tone.clone(), tone));
+        let m = s.apply(&[], 0, 0, Op::SpeedSemitones(12.0)).unwrap();
+        assert!(m.is_empty());
+        assert_eq!(s.frames(), 24_000);
+        // An octave up: 2 kHz has twice the zero crossings per second.
+        let crossings = s.audio().left[1000..23_000]
+            .windows(2)
+            .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
+            .count();
+        let expected = 2.0 * 2000.0 * 22_000.0 / 48_000.0;
+        assert!((crossings as f32 - expected).abs() < 4.0, "{crossings} vs {expected}");
     }
 
     #[test]
