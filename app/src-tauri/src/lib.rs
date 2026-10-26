@@ -146,7 +146,7 @@ struct OpenReel {
     root: String,
     index: usize,
     session: Session,
-    /// `ReelFile::audio_id` of the file on the card when last read or written.
+    /// `file_id` of the file on the card when last read or written.
     disk_id: u64,
 }
 
@@ -157,6 +157,15 @@ struct Editing(Mutex<Option<OpenReel>>);
 /// pasted into another reel.
 #[derive(Default)]
 struct SpliceClipboard(Mutex<Option<Clipboard>>);
+
+/// A hash of a whole reel file, so any change on the card shows, including
+/// markers added on the module. Compared only within one run of the app.
+fn file_id(bytes: &[u8]) -> u64 {
+    use std::hash::{DefaultHasher, Hasher};
+    let mut h = DefaultHasher::new();
+    h.write(bytes);
+    h.finish()
+}
 
 /// Run `f` on the open reel if it is `root`/`index`.
 fn with_open<T>(
@@ -185,12 +194,13 @@ async fn load_reel(
     index: usize,
 ) -> CmdResult<Response> {
     check_slot(index)?;
-    let file = ReelFile::open(&Card::new(&root).slot_path(index)).map_err(err)?;
+    let bytes = std::fs::read(Card::new(&root).slot_path(index)).map_err(err)?;
+    let file = ReelFile::parse(&bytes).map_err(err)?;
     let reel = Reel::from_file(&file).map_err(err)?;
-    let disk_id = file.audio_id();
+    let disk_id = file_id(&bytes);
     let mut out = Vec::with_capacity(12 + reel.markers.len() * 4 + reel.left.len() * 8);
     out.extend_from_slice(&(reel.markers.len() as u32).to_le_bytes());
-    out.extend_from_slice(&disk_id.to_le_bytes());
+    out.extend_from_slice(&file.audio_id().to_le_bytes());
     for m in &reel.markers {
         out.extend_from_slice(&m.to_le_bytes());
     }
@@ -515,14 +525,18 @@ async fn save_reel<R: Runtime>(
     with_open(&editing, &root, index, |open| {
         let card = Card::new(&root);
         let path = card.slot_path(index);
-        let mut file = ReelFile::open(&path).map_err(err)?;
-        if file.audio_id() != open.disk_id {
+        // Any change to the file counts, not just its audio: the module
+        // writes markers to the card when you splice on it.
+        let on_card = std::fs::read(&path).map_err(err)?;
+        if file_id(&on_card) != open.disk_id {
             return Err(format!(
-                "{} has changed since it was opened, so nothing was saved. \
-                 Is this the same card?",
+                "{} has changed on the card since it was opened, so nothing was saved. \
+                 Splicing on the module, another app or a different card with the same \
+                 name can do this. Open the reel again to see the card's version.",
                 card::slot_file_name(index)
             ));
         }
+        let mut file = ReelFile::parse(&on_card).map_err(err)?;
         let format = file.format().map_err(err)?;
         let s = &open.session;
         let frames = s.frames() as u32;
@@ -543,7 +557,7 @@ async fn save_reel<R: Runtime>(
         };
         card.write_slot(index, &bytes, &backup_dir(&app, &card)?)
             .map_err(err)?;
-        open.disk_id = ReelFile::parse(&bytes).map_err(err)?.audio_id();
+        open.disk_id = file_id(&bytes);
         open.session.mark_saved();
         Ok(card.slots().swap_remove(index).into())
     })
@@ -1131,10 +1145,18 @@ mod tests {
         assert_eq!(saved.frames(), 19200);
         assert!((saved.left[4800] - 0.03).abs() < 1e-4, "{}", saved.left[4800]);
 
+        // Markers changed on the card, as splicing on the module does, make
+        // save refuse even though the audio is the same.
+        let mut on_card = ReelFile::open(&card.slot_path(0)).unwrap();
+        on_card.set_markers(&[4800, 9600]);
+        std::fs::write(card.slot_path(0), on_card.to_bytes()).unwrap();
+        let refused = call(&w, "save_reel", args(serde_json::json!({ "markers": [4800] }))).unwrap_err();
+        assert!(refused.to_string().contains("changed on the card"), "{refused}");
+
         // A different file in the slot makes save refuse.
         std::fs::write(card.slot_path(0), reel.to_wav_bytes().unwrap()).unwrap();
         let refused = call(&w, "save_reel", args(serde_json::json!({ "markers": [4800] }))).unwrap_err();
-        assert!(refused.to_string().contains("changed since it was opened"), "{refused}");
+        assert!(refused.to_string().contains("changed on the card"), "{refused}");
 
         // Clean up the card and the backups the saves made.
         let backups = backup_dir(app.handle(), &card).unwrap();
