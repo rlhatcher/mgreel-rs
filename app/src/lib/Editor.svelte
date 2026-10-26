@@ -435,37 +435,58 @@
     runEdit({ kind: "moveTo", to });
   }
 
+  let pointer = { x: 0, y: 0 };
+  let scrollFrame = 0;
+
+  function findTarget() {
+    const row = document.elementFromPoint(pointer.x, pointer.y)?.closest<HTMLElement>("tr[data-splice]");
+    dropTarget = row ? Number(row.dataset.splice) : null;
+  }
+
+  // While the pointer stays near the top or bottom edge, scroll the list a
+  // step each frame to reach rows out of view.
+  function edgeScroll() {
+    scrollFrame = 0;
+    if (dragFrom === null || !list) return;
+    const box = list.getBoundingClientRect();
+    const step = pointer.y < box.top + 24 ? -12 : pointer.y > box.bottom - 24 ? 12 : 0;
+    if (step === 0) return;
+    list.scrollTop += step;
+    findTarget();
+    scrollFrame = requestAnimationFrame(edgeScroll);
+  }
+
   function onPointerMove(e: PointerEvent) {
     if (!press) return;
+    // The button came up where the window couldn't see it, as outside it.
+    if (e.buttons === 0) {
+      cancelDrag();
+      return;
+    }
     if (dragFrom === null) {
       if (Math.abs(e.clientY - press.y) < 4) return;
       dragFrom = press.index;
     }
-    const row = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>("tr[data-splice]");
-    dropTarget = row ? Number(row.dataset.splice) : null;
-    // Near the top or bottom edge, scroll the list to reach rows out of view.
-    if (list) {
-      const box = list.getBoundingClientRect();
-      if (e.clientY < box.top + 24) list.scrollTop -= 12;
-      else if (e.clientY > box.bottom - 24) list.scrollTop += 12;
-    }
+    pointer = { x: e.clientX, y: e.clientY };
+    findTarget();
+    if (!scrollFrame) edgeScroll();
   }
 
   function onPointerUp() {
     if (!press) return;
-    press = null;
-    if (dragFrom === null) return;
-    dragged = true;
-    const target = dropTarget;
-    dropTarget = null;
-    if (target === null) dragFrom = null;
-    else dropOn(target);
+    if (dragFrom !== null) {
+      dragged = true;
+      if (dropTarget !== null) dropOn(dropTarget);
+    }
+    cancelDrag();
   }
 
   function cancelDrag() {
     press = null;
     dragFrom = null;
     dropTarget = null;
+    cancelAnimationFrame(scrollFrame);
+    scrollFrame = 0;
   }
 
   // Preview
