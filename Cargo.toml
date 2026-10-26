@@ -1,5 +1,8 @@
 [workspace]
 members = ["crates/mgreel-core", "crates/mgreel-cli", "app/src-tauri"]
+# The app needs a built frontend (app/build), so plain `cargo build` at
+# the root skips it. Build it with `cargo tauri build` in app/.
+default-members = ["crates/mgreel-core", "crates/mgreel-cli"]
 resolver = "2"
 
 [workspace.package]

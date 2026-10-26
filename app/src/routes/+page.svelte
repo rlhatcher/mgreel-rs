@@ -112,7 +112,15 @@
     </div>
     <div class="card">
       {#if allCards.length}
-        <select value={root} onchange={(e) => chooseCard(e.currentTarget.value)}>
+        <select
+          value={root}
+          onchange={async (e) => {
+            const el = e.currentTarget;
+            await chooseCard(el.value);
+            // After a cancel, show the card that is still open.
+            el.value = root ?? "";
+          }}
+        >
           {#each allCards as card}
             <option value={card.root}>{card.label}</option>
           {/each}
