@@ -114,6 +114,16 @@
     if (tab === "editor") tab = "library";
   }
 
+  /** Cmd-1 to Cmd-4 open the tabs in the order they appear. */
+  function onKey(e: KeyboardEvent) {
+    if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+    const order: Tab[] = ["library", "editor", "builder", "options"];
+    const next = order[Number(e.key) - 1];
+    if (!next) return;
+    e.preventDefault();
+    if (next === "builder" || (root && (next !== "editor" || editing !== null))) go(next);
+  }
+
   onMount(() => {
     refreshCards();
     const unlisten = listen("cards-changed", () => refreshCards());
@@ -122,6 +132,8 @@
     };
   });
 </script>
+
+<svelte:window onkeydown={onKey} />
 
 <div class="app">
   <nav>

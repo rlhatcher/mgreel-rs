@@ -10,6 +10,7 @@
   --wave: #3d3a35;
   --wave-dim: #a39d93;
   --marker: #c9631a;
+  --marker-locked: #1f6f8b;
   --select: rgba(201, 99, 26, 0.12);
   --danger: #b3261e;
   --ok: #2e7d4f;
@@ -30,6 +31,7 @@
     --wave: #d9d3c8;
     --wave-dim: #6b665e;
     --marker: #e8843a;
+    --marker-locked: #6fb7d1;
     --select: rgba(232, 132, 58, 0.16);
     --danger: #f2766b;
     --ok: #6cc391;

@@ -94,6 +94,48 @@ pub fn auto_slice(left: &[f32], right: &[f32], options: Options) -> Vec<u32> {
     markers
 }
 
+/// Like `auto_slice`, but `keep` markers stay where they are. Each stretch
+/// between them is sliced on its own, and the marker budget left after the
+/// kept ones is shared out by length.
+pub fn auto_slice_keeping(left: &[f32], right: &[f32], options: Options, keep: &[u32]) -> Vec<u32> {
+    let frames = left.len().min(right.len());
+    let mut keep: Vec<u32> = keep
+        .iter()
+        .copied()
+        .filter(|&k| k > 0 && (k as usize) < frames)
+        .collect();
+    keep.sort_unstable();
+    keep.dedup();
+    if keep.is_empty() {
+        return auto_slice(left, right, options);
+    }
+    let budget = options.max_markers.min(MAX_MARKERS).saturating_sub(keep.len());
+    let bounds: Vec<usize> = std::iter::once(0)
+        .chain(keep.iter().map(|&k| k as usize))
+        .chain(std::iter::once(frames))
+        .collect();
+    let mut markers = keep.clone();
+    for pair in bounds.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        let share = budget * (end - start) / frames;
+        if share == 0 {
+            continue;
+        }
+        let part = Options {
+            max_markers: share,
+            ..options
+        };
+        markers.extend(
+            auto_slice(&left[start..end], &right[start..end], part)
+                .into_iter()
+                .map(|m| m + start as u32),
+        );
+    }
+    markers.sort_unstable();
+    markers.dedup();
+    markers
+}
+
 /// Per-frame levels in dB.
 struct Bands {
     bands: Vec<Vec<f32>>,
@@ -455,6 +497,38 @@ mod tests {
 
     fn secs(s: f32) -> usize {
         (s * SAMPLE_RATE as f32) as usize
+    }
+
+    #[test]
+    fn keeping_markers_slices_around_them() {
+        let mut seed = 7;
+        let mut x: Vec<f32> = noise(secs(12.0), &mut seed)
+            .iter()
+            .map(|s| s * 0.02)
+            .collect();
+        for k in 1..7 {
+            let b = secs(k as f32 * 1.5);
+            for (i, s) in noise(secs(0.4), &mut seed).into_iter().enumerate() {
+                x[b + i] += s * 0.5;
+            }
+        }
+        let options = Options {
+            max_seconds: None,
+            ..Options::gestures()
+        };
+        let keep = secs(5.0) as u32;
+        let markers = auto_slice_keeping(&x, &x, options, &[keep]);
+        assert!(markers.contains(&keep), "{markers:?}");
+        assert!(markers.windows(2).all(|w| w[0] < w[1]));
+        // The kept marker sits between two bursts, so the bursts still
+        // each get a cut before them.
+        assert!(markers.len() >= 6, "{markers:?}");
+        // A budget of one leaves only the kept marker.
+        let tight = Options {
+            max_markers: 1,
+            ..options
+        };
+        assert_eq!(auto_slice_keeping(&x, &x, tight, &[keep]), vec![keep]);
     }
 
     #[test]

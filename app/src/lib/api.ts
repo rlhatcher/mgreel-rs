@@ -87,7 +87,8 @@ export const autoSlice = (
   minSeconds: number,
   maxSeconds: number | null,
   maxMarkers: number,
-) => invoke<number[]>("auto_slice", { root, index, mode, minSeconds, maxSeconds, maxMarkers });
+  keep: number[],
+) => invoke<number[]>("auto_slice", { root, index, mode, minSeconds, maxSeconds, maxMarkers, keep });
 export const probeSources = (paths: string[]) => invoke<Source[]>("probe_sources", { paths });
 export const buildReel = (
   sources: SourceSpec[],

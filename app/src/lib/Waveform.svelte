@@ -1,7 +1,7 @@
 <script lang="ts">
   // Canvas waveform with splice markers. Click sets the cursor, drag a
-  // marker to move it, double-click to add one. Pinch or Cmd-scroll zooms,
-  // horizontal scroll pans.
+  // marker to move it, double-click to add one. Locked markers don't move.
+  // Pinch or Cmd-scroll zooms, horizontal scroll pans.
   import { onMount } from "svelte";
 
   type Props = {
@@ -11,7 +11,15 @@
     cursor: number;
     playhead: number | null;
     selectedMarker: number | null;
+    /** Frames of markers that can't be moved. */
+    locked: ReadonlySet<number>;
     onseek?: (frame: number) => void;
+    /** Double-click asks for a marker here; the parent adds it. */
+    onadd: (frame: number) => void;
+    /** A drag is about to move marker `index`. */
+    ondragstart: (index: number) => void;
+    /** A drag moved marker `index` and has ended. */
+    ondragend: (index: number) => void;
   };
   let {
     left,
@@ -20,7 +28,11 @@
     cursor = $bindable(),
     playhead,
     selectedMarker = $bindable(),
+    locked,
     onseek,
+    onadd,
+    ondragstart,
+    ondragend,
   }: Props = $props();
 
   const BLOCK = 256;
@@ -32,6 +44,7 @@
   let viewStart = $state(0);
   let viewEnd = $state(1);
   let dragging: number | null = null;
+  let moved = false;
   let hoverMarker = $state(false);
 
   const frames = $derived(left.length);
@@ -149,17 +162,23 @@
     markers.forEach((m, i) => {
       const x = Math.round(toX(m)) + 0.5;
       if (x < -HANDLE_PX || x > width + HANDLE_PX) return;
-      ctx.strokeStyle = ctx.fillStyle = color("--marker");
+      const isLocked = locked.has(m);
+      ctx.strokeStyle = ctx.fillStyle = color(isLocked ? "--marker-locked" : "--marker");
       ctx.lineWidth = i === selectedMarker ? 2 : 1;
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, HEIGHT);
       ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(x - HANDLE_PX, 0);
-      ctx.lineTo(x + HANDLE_PX, 0);
-      ctx.lineTo(x, HANDLE_PX + 3);
-      ctx.fill();
+      if (isLocked) {
+        // A square handle for a locked marker, a triangle otherwise.
+        ctx.fillRect(x - HANDLE_PX + 1, 0, 2 * HANDLE_PX - 2, HANDLE_PX + 1);
+      } else {
+        ctx.beginPath();
+        ctx.moveTo(x - HANDLE_PX, 0);
+        ctx.lineTo(x + HANDLE_PX, 0);
+        ctx.lineTo(x, HANDLE_PX + 3);
+        ctx.fill();
+      }
     });
 
     ctx.fillStyle = color("--muted");
@@ -173,7 +192,7 @@
   let frame = 0;
   $effect(() => {
     // Track everything draw() reads.
-    void [width, viewStart, viewEnd, markers.length, ...markers, cursor, playhead, selectedMarker, blocks];
+    void [width, viewStart, viewEnd, markers.length, ...markers, cursor, playhead, selectedMarker, blocks, locked];
     cancelAnimationFrame(frame);
     frame = requestAnimationFrame(draw);
   });
@@ -198,9 +217,12 @@
     const x = pointerX(e);
     const hit = markerAt(x);
     if (hit !== null) {
-      dragging = hit;
       selectedMarker = hit;
-      canvas.setPointerCapture(e.pointerId);
+      if (!locked.has(markers[hit])) {
+        dragging = hit;
+        moved = false;
+        canvas.setPointerCapture(e.pointerId);
+      }
       return;
     }
     selectedMarker = null;
@@ -216,21 +238,26 @@
     }
     const lo = (markers[dragging - 1] ?? 0) + 1;
     const hi = (markers[dragging + 1] ?? frames) - 1;
+    const at = Math.max(lo, Math.min(hi, toFrame(x)));
+    if (at === markers[dragging]) return;
+    if (!moved) ondragstart(dragging);
+    moved = true;
     const next = markers.slice();
-    next[dragging] = Math.max(lo, Math.min(hi, toFrame(x)));
+    next[dragging] = at;
     markers = next;
   }
 
   function onPointerUp(e: PointerEvent) {
-    if (dragging !== null) canvas.releasePointerCapture(e.pointerId);
+    if (dragging !== null) {
+      canvas.releasePointerCapture(e.pointerId);
+      if (moved) ondragend(dragging);
+    }
     dragging = null;
   }
 
   function onDoubleClick(e: MouseEvent) {
     const at = toFrame(pointerX(e));
-    if (at <= 0 || at >= frames || markers.includes(at)) return;
-    markers = [...markers, at].sort((a, b) => a - b);
-    selectedMarker = markers.indexOf(at);
+    if (at > 0 && at < frames) onadd(at);
   }
 
   function onWheel(e: WheelEvent) {
