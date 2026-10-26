@@ -5,13 +5,15 @@ use mgreel_core::card::{self, Card, SlotInfo};
 use mgreel_core::options::{self, Kind, OptionsFile};
 use mgreel_core::reel::{self, Problem};
 use mgreel_core::riff::{self, Format};
+use mgreel_core::edit::{Clipboard, Op, Session, Span, Stereo};
 use mgreel_core::slice;
 use mgreel_core::{BuildOptions, Clip, Reel, ReelFile};
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tauri::ipc::Response;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 const VOLUMES: &str = "/Volumes";
 
@@ -56,7 +58,7 @@ impl From<SlotInfo> for SlotDto {
     }
 }
 
-fn backup_dir(app: &AppHandle, card: &Card) -> CmdResult<PathBuf> {
+fn backup_dir<R: Runtime>(app: &AppHandle<R>, card: &Card) -> CmdResult<PathBuf> {
     let dir = app.path().app_data_dir().map_err(err)?;
     Ok(dir.join("backups").join(card.label()))
 }
@@ -134,79 +136,278 @@ async fn restore_card(app: AppHandle, root: String, from: String) -> CmdResult<(
 }
 
 // Reel editor
+//
+// The open reel's audio lives here while it is edited. The editor holds the
+// markers and sends them with each command; edits come back as spans for
+// the editor to apply to its own copy of the audio.
 
-/// The reel as 48 kHz stereo floats, for drawing and playback.
+/// The reel open in the editor.
+struct OpenReel {
+    root: String,
+    index: usize,
+    session: Session,
+    /// `ReelFile::audio_id` of the file on the card when last read or written.
+    disk_id: u64,
+    /// The history position whose audio matches the card.
+    disk_pos: usize,
+}
+
+#[derive(Default)]
+struct Editing(Mutex<Option<OpenReel>>);
+
+/// Splices copied in the editor. Stays across reels, so splices can be
+/// pasted into another reel.
+#[derive(Default)]
+struct SpliceClipboard(Mutex<Option<Clipboard>>);
+
+/// Run `f` on the open reel if it is `root`/`index`.
+fn with_open<T>(
+    editing: &Editing,
+    root: &str,
+    index: usize,
+    f: impl FnOnce(&mut OpenReel) -> CmdResult<T>,
+) -> CmdResult<T> {
+    let mut guard = editing.0.lock().map_err(err)?;
+    match guard.as_mut() {
+        Some(open) if open.root == root && open.index == index => f(open),
+        _ => Err(format!(
+            "{} isn't open in the editor any more. Open it again.",
+            card::slot_file_name(index)
+        )),
+    }
+}
+
+/// Open a reel for editing, as 48 kHz stereo floats for drawing and playback.
 /// Layout, little-endian: u32 marker count, the u64 audio id, the markers as
 /// u32 frames, then every left sample followed by every right sample as f32.
 #[tauri::command]
-async fn load_reel(root: String, index: usize) -> CmdResult<Response> {
+async fn load_reel(
+    editing: State<'_, Editing>,
+    root: String,
+    index: usize,
+) -> CmdResult<Response> {
     check_slot(index)?;
-    let file = ReelFile::open(&Card::new(root).slot_path(index)).map_err(err)?;
+    let file = ReelFile::open(&Card::new(&root).slot_path(index)).map_err(err)?;
     let reel = Reel::from_file(&file).map_err(err)?;
+    let disk_id = file.audio_id();
     let mut out = Vec::with_capacity(12 + reel.markers.len() * 4 + reel.left.len() * 8);
     out.extend_from_slice(&(reel.markers.len() as u32).to_le_bytes());
-    out.extend_from_slice(&file.audio_id().to_le_bytes());
+    out.extend_from_slice(&disk_id.to_le_bytes());
     for m in &reel.markers {
         out.extend_from_slice(&m.to_le_bytes());
     }
     for s in reel.left.iter().chain(&reel.right) {
         out.extend_from_slice(&s.to_le_bytes());
     }
+    *editing.0.lock().map_err(err)? = Some(OpenReel {
+        root,
+        index,
+        session: Session::new(Stereo::new(reel.left, reel.right)),
+        disk_id,
+        disk_pos: 0,
+    });
     Ok(Response::new(out))
 }
 
-/// Save new markers. A reel already in Morphagene format keeps its audio
-/// and other chunks untouched; any other format is converted on save.
+/// An edit's result. Layout, little-endian u32s unless noted: history
+/// position, oldest reachable position, 1 if markers follow (else 0), the
+/// marker count and markers, the span count, then for each span its start,
+/// frames removed, frames inserted, and the inserted left then right
+/// samples as f32.
+fn edit_result(pos: usize, oldest: usize, markers: Option<&[u32]>, spans: &[Span]) -> Response {
+    let samples: usize = spans.iter().map(|s| s.inserted.len() * 2).sum();
+    let mut out = Vec::with_capacity(24 + markers.map_or(0, <[u32]>::len) * 4 + spans.len() * 12 + samples * 4);
+    let mut put = |v: u32| out.extend_from_slice(&v.to_le_bytes());
+    put(pos as u32);
+    put(oldest as u32);
+    put(markers.is_some() as u32);
+    let markers = markers.unwrap_or_default();
+    put(markers.len() as u32);
+    for &m in markers {
+        put(m);
+    }
+    put(spans.len() as u32);
+    for s in spans {
+        put(s.start as u32);
+        put(s.removed as u32);
+        put(s.inserted.len() as u32);
+    }
+    for s in spans {
+        for x in s.inserted.left.iter().chain(&s.inserted.right) {
+            out.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    Response::new(out)
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+enum EditOp {
+    Delete,
+    Duplicate,
+    MoveTo { to: usize },
+    Shuffle { seed: u64 },
+    Reverse,
+    Gain { db: f32 },
+    Normalize { db: f32 },
+    MatchLevels,
+    FadeIn { ms: f32 },
+    FadeOut { ms: f32 },
+    SmoothLoop { ms: f32 },
+    RemoveDc,
+    HighPass { hz: f32 },
+}
+
+impl From<EditOp> for Op {
+    fn from(op: EditOp) -> Op {
+        match op {
+            EditOp::Delete => Op::Delete,
+            EditOp::Duplicate => Op::Duplicate,
+            EditOp::MoveTo { to } => Op::MoveTo(to),
+            EditOp::Shuffle { seed } => Op::Shuffle(seed),
+            EditOp::Reverse => Op::Reverse,
+            EditOp::Gain { db } => Op::GainDb(db),
+            EditOp::Normalize { db } => Op::NormalizeDb(db),
+            EditOp::MatchLevels => Op::MatchLevels,
+            EditOp::FadeIn { ms } => Op::FadeInMs(ms),
+            EditOp::FadeOut { ms } => Op::FadeOutMs(ms),
+            EditOp::SmoothLoop { ms } => Op::SmoothLoopMs(ms),
+            EditOp::RemoveDc => Op::RemoveDc,
+            EditOp::HighPass { hz } => Op::HighPassHz(hz),
+        }
+    }
+}
+
+/// Apply `op` to splices `first..=last` of the open reel.
 #[tauri::command]
-async fn save_markers(
-    app: AppHandle,
+async fn edit_reel(
+    editing: State<'_, Editing>,
     root: String,
     index: usize,
     markers: Vec<u32>,
-    audio_id: String,
-) -> CmdResult<Saved> {
-    check_slot(index)?;
-    let card = Card::new(root);
-    let path = card.slot_path(index);
-    let mut file = ReelFile::open(&path).map_err(err)?;
-    // A different card with the same name mounts at the same path, and
-    // the reel can change on the card while it is open here. Either way,
-    // these markers belong to other audio.
-    if file.audio_id().to_string() != audio_id {
-        return Err(format!(
-            "{} has changed since it was opened, so the markers were not saved. \
-             Is this the same card?",
-            card::slot_file_name(index)
-        ));
-    }
-    let format = file.format().map_err(err)?;
-    let bytes = if reel::is_morphagene_format(&format) {
-        let frames = file.frames().map_err(err)?;
-        let markers = reel::clean_markers(markers, frames);
-        check_limits(frames, markers.len())?;
-        file.set_markers(&markers);
-        file.to_bytes()
-    } else {
-        let mut reel = Reel::from_file(&file).map_err(err)?;
-        reel.markers = reel::clean_markers(markers, reel.frames());
-        check_limits(reel.frames(), reel.markers.len())?;
-        reel.to_wav_bytes().map_err(err)?
-    };
-    card.write_slot(index, &bytes, &backup_dir(&app, &card)?)
-        .map_err(err)?;
-    // Converting the format changes the audio, so the editor needs the new id.
-    let audio_id = ReelFile::parse(&bytes).map_err(err)?.audio_id().to_string();
-    Ok(Saved {
-        slot: card.slots().swap_remove(index).into(),
-        audio_id,
+    first: usize,
+    last: usize,
+    op: EditOp,
+) -> CmdResult<Response> {
+    with_open(&editing, &root, index, |open| {
+        let s = &mut open.session;
+        let before = s.position();
+        let markers = s.apply(&markers, first, last, op.into()).map_err(err)?;
+        let spans: Vec<Span> = if s.position() != before {
+            s.last_span().into_iter().collect()
+        } else {
+            Vec::new()
+        };
+        Ok(edit_result(s.position(), s.oldest(), Some(&markers), &spans))
     })
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Saved {
-    slot: SlotDto,
-    audio_id: String,
+/// Copy splices `first..=last` of the open reel. Returns how many.
+#[tauri::command]
+async fn copy_splices(
+    editing: State<'_, Editing>,
+    clipboard: State<'_, SpliceClipboard>,
+    root: String,
+    index: usize,
+    markers: Vec<u32>,
+    first: usize,
+    last: usize,
+) -> CmdResult<usize> {
+    let clip = with_open(&editing, &root, index, |open| {
+        open.session.copy(&markers, first, last).map_err(err)
+    })?;
+    let count = clip.lengths.len();
+    *clipboard.0.lock().map_err(err)? = Some(clip);
+    Ok(count)
+}
+
+/// Paste the copied splices before splice `at` of the open reel.
+#[tauri::command]
+async fn paste_splices(
+    editing: State<'_, Editing>,
+    clipboard: State<'_, SpliceClipboard>,
+    root: String,
+    index: usize,
+    markers: Vec<u32>,
+    at: usize,
+) -> CmdResult<Response> {
+    let clip = clipboard
+        .0
+        .lock()
+        .map_err(err)?
+        .clone()
+        .ok_or("Copy some splices first.")?;
+    with_open(&editing, &root, index, |open| {
+        let s = &mut open.session;
+        let markers = s.paste(&markers, at, &clip).map_err(err)?;
+        let spans: Vec<Span> = s.last_span().into_iter().collect();
+        Ok(edit_result(s.position(), s.oldest(), Some(&markers), &spans))
+    })
+}
+
+/// Undo or redo audio edits until the history is at `pos`.
+#[tauri::command]
+async fn seek_history(
+    editing: State<'_, Editing>,
+    root: String,
+    index: usize,
+    pos: usize,
+) -> CmdResult<Response> {
+    with_open(&editing, &root, index, |open| {
+        let oldest = open.session.oldest();
+        let spans = open.session.seek(pos).map_err(err)?;
+        Ok(edit_result(pos, oldest, None, &spans))
+    })
+}
+
+/// Write the open reel to its slot. If the audio matches the card, only the
+/// cue chunk changes and every other chunk is kept; otherwise the whole
+/// reel is written. Refuses if the file on the card changed since it was
+/// read, as happens when a different card with the same name is mounted.
+#[tauri::command]
+async fn save_reel<R: Runtime>(
+    app: AppHandle<R>,
+    editing: State<'_, Editing>,
+    root: String,
+    index: usize,
+    markers: Vec<u32>,
+) -> CmdResult<SlotDto> {
+    check_slot(index)?;
+    with_open(&editing, &root, index, |open| {
+        let card = Card::new(&root);
+        let path = card.slot_path(index);
+        let mut file = ReelFile::open(&path).map_err(err)?;
+        if file.audio_id() != open.disk_id {
+            return Err(format!(
+                "{} has changed since it was opened, so nothing was saved. \
+                 Is this the same card?",
+                card::slot_file_name(index)
+            ));
+        }
+        let format = file.format().map_err(err)?;
+        let s = &open.session;
+        let frames = s.frames() as u32;
+        let markers = reel::clean_markers(markers, frames);
+        check_limits(frames, markers.len())?;
+        let bytes = if s.position() == open.disk_pos && reel::is_morphagene_format(&format) {
+            file.set_markers(&markers);
+            file.to_bytes()
+        } else {
+            let audio = s.audio();
+            Reel {
+                left: audio.left.clone(),
+                right: audio.right.clone(),
+                markers,
+            }
+            .to_wav_bytes()
+            .map_err(err)?
+        };
+        card.write_slot(index, &bytes, &backup_dir(&app, &card)?)
+            .map_err(err)?;
+        open.disk_id = ReelFile::parse(&bytes).map_err(err)?.audio_id();
+        open.disk_pos = s.position();
+        Ok(card.slots().swap_remove(index).into())
+    })
 }
 
 #[derive(Deserialize)]
@@ -216,10 +417,12 @@ enum SliceMode {
     Gestures,
 }
 
-/// Propose markers for a reel. Nothing is written; the editor shows them as
-/// unsaved changes.
+/// Propose markers for the open reel, edits included. Nothing is written;
+/// the editor shows them as unsaved changes.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn auto_slice(
+    editing: State<'_, Editing>,
     root: String,
     index: usize,
     mode: SliceMode,
@@ -228,8 +431,6 @@ async fn auto_slice(
     max_markers: usize,
     keep: Vec<u32>,
 ) -> CmdResult<Vec<u32>> {
-    check_slot(index)?;
-    let reel = Reel::open(&Card::new(root).slot_path(index)).map_err(err)?;
     let options = slice::Options {
         mode: match mode {
             SliceMode::Phrases => slice::Mode::Phrases,
@@ -239,7 +440,10 @@ async fn auto_slice(
         max_seconds,
         max_markers,
     };
-    Ok(slice::auto_slice_keeping(&reel.left, &reel.right, options, &keep))
+    with_open(&editing, &root, index, |open| {
+        let audio = open.session.audio();
+        Ok(slice::auto_slice_keeping(&audio.left, &audio.right, options, &keep))
+    })
 }
 
 fn check_limits(frames: u32, markers: usize) -> CmdResult<()> {
@@ -511,6 +715,8 @@ pub fn run() {
                 .map_err(|e| eprintln!("not watching {VOLUMES}: {e}"))
                 .ok();
             app.manage(VolumeWatcher(watcher));
+            app.manage(Editing::default());
+            app.manage(SpliceClipboard::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -523,7 +729,11 @@ pub fn run() {
             backup_card,
             restore_card,
             load_reel,
-            save_markers,
+            save_reel,
+            edit_reel,
+            copy_splices,
+            paste_splices,
+            seek_history,
             auto_slice,
             probe_sources,
             build_reel,
@@ -533,4 +743,191 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    //! The editor commands through Tauri's IPC layer on a mock runtime,
+    //! against a card folder in the temp directory.
+
+    use super::*;
+    use tauri::ipc::{CallbackFn, InvokeBody, InvokeResponseBody};
+    use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, MockRuntime, INVOKE_KEY};
+    use tauri::webview::InvokeRequest;
+    use tauri::WebviewWindow;
+
+    fn window() -> (tauri::App<MockRuntime>, WebviewWindow<MockRuntime>) {
+        let app = mock_builder()
+            .manage(Editing::default())
+            .manage(SpliceClipboard::default())
+            .invoke_handler(tauri::generate_handler![
+                load_reel,
+                edit_reel,
+                copy_splices,
+                paste_splices,
+                seek_history,
+                save_reel,
+            ])
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let w = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        (app, w)
+    }
+
+    fn call(
+        w: &WebviewWindow<MockRuntime>,
+        cmd: &str,
+        args: serde_json::Value,
+    ) -> Result<InvokeResponseBody, serde_json::Value> {
+        get_ipc_response(
+            w,
+            InvokeRequest {
+                cmd: cmd.into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: InvokeBody::Json(args),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_string(),
+            },
+        )
+    }
+
+    fn raw(body: InvokeResponseBody) -> Vec<u8> {
+        match body {
+            InvokeResponseBody::Raw(bytes) => bytes,
+            InvokeResponseBody::Json(json) => panic!("expected bytes, got {json}"),
+        }
+    }
+
+    /// The edit reply as the frontend reads it: position, oldest, markers,
+    /// and (start, removed, inserted left samples) per span.
+    #[allow(clippy::type_complexity)]
+    fn decode(bytes: &[u8]) -> (u32, u32, Option<Vec<u32>>, Vec<(u32, u32, Vec<f32>)>) {
+        let mut at = 0;
+        let mut u32_ = || {
+            let v = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            at += 4;
+            v
+        };
+        let pos = u32_();
+        let oldest = u32_();
+        let has = u32_() == 1;
+        let n = u32_();
+        let markers: Vec<u32> = (0..n).map(|_| u32_()).collect();
+        let count = u32_();
+        let heads: Vec<(u32, u32, u32)> = (0..count).map(|_| (u32_(), u32_(), u32_())).collect();
+        let mut spans = Vec::new();
+        for (start, removed, inserted) in heads {
+            let left = (0..inserted)
+                .map(|_| f32::from_bits(u32_()))
+                .collect::<Vec<_>>();
+            (0..inserted).for_each(|_| {
+                u32_();
+            });
+            spans.push((start, removed, left));
+        }
+        assert_eq!(at, bytes.len(), "reply has trailing bytes");
+        (pos, oldest, has.then_some(markers), spans)
+    }
+
+    #[test]
+    fn edit_undo_paste_and_save_through_ipc() {
+        let root = std::env::temp_dir().join(format!("mgreel-ipc-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root_s = root.display().to_string();
+        let card = Card::new(&root);
+        // Three splices of 0.1, 0.2 and 0.3, lasting 0.1, 0.2 and 0.3 s.
+        let mut left = Vec::new();
+        for (v, n) in [(0.1f32, 4800), (0.2, 9600), (0.3, 14400)] {
+            left.extend(std::iter::repeat_n(v, n));
+        }
+        let reel = Reel {
+            right: left.clone(),
+            left,
+            markers: vec![4800, 14400],
+        };
+        std::fs::write(card.slot_path(0), reel.to_wav_bytes().unwrap()).unwrap();
+
+        let (app, w) = window();
+        let args = |extra: serde_json::Value| {
+            let mut v = serde_json::json!({ "root": root_s, "index": 0 });
+            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            v
+        };
+
+        let loaded = raw(call(&w, "load_reel", args(serde_json::json!({}))).unwrap());
+        assert_eq!(u32::from_le_bytes(loaded[0..4].try_into().unwrap()), 2);
+
+        // Delete the middle splice.
+        let reply = raw(call(
+            &w,
+            "edit_reel",
+            args(serde_json::json!({ "markers": [4800, 14400], "first": 1, "last": 1, "op": { "kind": "delete" } })),
+        )
+        .unwrap());
+        // MGREEL_DUMP_DIR keeps the replies, to check the frontend's parser.
+        if let Ok(dir) = std::env::var("MGREEL_DUMP_DIR") {
+            std::fs::write(Path::new(&dir).join("load.bin"), &loaded).unwrap();
+            std::fs::write(Path::new(&dir).join("delete.bin"), &reply).unwrap();
+        }
+        let (pos, _, markers, spans) = decode(&reply);
+        assert_eq!(pos, 1);
+        assert_eq!(markers, Some(vec![4800]));
+        assert_eq!(spans, vec![(4800, 9600, vec![])]);
+
+        // Undo puts the 0.2 splice back; redo takes it out again.
+        let undo = raw(call(&w, "seek_history", args(serde_json::json!({ "pos": 0 }))).unwrap());
+        if let Ok(dir) = std::env::var("MGREEL_DUMP_DIR") {
+            std::fs::write(Path::new(&dir).join("undo.bin"), &undo).unwrap();
+        }
+        let (pos, _, markers, spans) = decode(&undo);
+        assert_eq!((pos, markers), (0, None));
+        assert_eq!(spans.len(), 1);
+        assert_eq!((spans[0].0, spans[0].1, spans[0].2.len()), (4800, 0, 9600));
+        assert!(spans[0].2.iter().all(|&x| x == 0.2));
+        let (pos, ..) = decode(&raw(call(&w, "seek_history", args(serde_json::json!({ "pos": 1 }))).unwrap()));
+        assert_eq!(pos, 1);
+
+        // A gain change in dB arrives with camelCase fields.
+        let (pos, _, _, spans) = decode(&raw(call(
+            &w,
+            "edit_reel",
+            args(serde_json::json!({ "markers": [4800], "first": 0, "last": 0, "op": { "kind": "gain", "db": -6.0206 } })),
+        )
+        .unwrap()));
+        assert_eq!(pos, 2);
+        assert!((spans[0].2[0] - 0.05).abs() < 1e-4);
+
+        // Copy the first splice and paste it at the end.
+        call(&w, "copy_splices", args(serde_json::json!({ "markers": [4800], "first": 0, "last": 0 }))).unwrap();
+        let (_, _, markers, _) = decode(&raw(call(
+            &w,
+            "paste_splices",
+            args(serde_json::json!({ "markers": [4800], "at": 2 })),
+        )
+        .unwrap()));
+        assert_eq!(markers, Some(vec![4800, 19200]));
+
+        // Save writes the edited audio and markers.
+        call(&w, "save_reel", args(serde_json::json!({ "markers": [4800, 19200] }))).unwrap();
+        let saved = Reel::open(&card.slot_path(0)).unwrap();
+        assert_eq!(saved.frames(), 24000);
+        assert_eq!(saved.markers, vec![4800, 19200]);
+        assert!((saved.left[0] - 0.05).abs() < 1e-4);
+        assert_eq!(saved.left[4800], 0.3);
+        assert!((saved.left[23999] - 0.05).abs() < 1e-4);
+
+        // A different file in the slot makes save refuse.
+        std::fs::write(card.slot_path(0), reel.to_wav_bytes().unwrap()).unwrap();
+        let refused = call(&w, "save_reel", args(serde_json::json!({ "markers": [4800] }))).unwrap_err();
+        assert!(refused.to_string().contains("changed since it was opened"), "{refused}");
+
+        // Clean up the card and the backups the saves made.
+        let backups = backup_dir(app.handle(), &card).unwrap();
+        std::fs::remove_dir_all(&backups).ok();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

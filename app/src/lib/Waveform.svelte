@@ -2,7 +2,7 @@
   // Canvas waveform with splice markers. Click sets the cursor, drag a
   // marker to move it, double-click to add one. Locked markers don't move.
   // Pinch or Cmd-scroll zooms, horizontal scroll pans.
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
 
   type Props = {
     left: Float32Array;
@@ -74,10 +74,19 @@
   });
 
   $effect(() => {
-    // A new reel resets the view to the whole thing.
-    void left;
-    viewStart = 0;
-    viewEnd = Math.max(1, frames);
+    // Show the whole reel at first. After an edit changes the length, keep
+    // the view where it was, pulled back inside the reel.
+    const f = Math.max(1, frames);
+    untrack(() => {
+      const span = viewEnd - viewStart;
+      if (viewEnd <= 1 || span >= f) {
+        viewStart = 0;
+        viewEnd = f;
+      } else if (viewEnd > f) {
+        viewStart = f - span;
+        viewEnd = f;
+      }
+    });
   });
 
   const toFrame = (x: number) => Math.round(viewStart + (x / width) * (viewEnd - viewStart));

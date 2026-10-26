@@ -347,7 +347,7 @@ fn zero_crossing(mono: &[f32], at: usize) -> usize {
 }
 
 /// RBJ cookbook biquad, Q = 1/sqrt(2).
-struct Biquad {
+pub(crate) struct Biquad {
     b: [f32; 3],
     a: [f32; 2],
     x: [f32; 2],
@@ -377,11 +377,11 @@ impl Biquad {
         Biquad::new(fc, fs, false)
     }
 
-    fn high_pass(fc: f32, fs: f32) -> Biquad {
+    pub(crate) fn high_pass(fc: f32, fs: f32) -> Biquad {
         Biquad::new(fc, fs, true)
     }
 
-    fn process(&mut self, x: f32) -> f32 {
+    pub(crate) fn process(&mut self, x: f32) -> f32 {
         let y = self.b[0] * x + self.b[1] * self.x[0] + self.b[2] * self.x[1]
             - self.a[0] * self.y[0]
             - self.a[1] * self.y[1];
