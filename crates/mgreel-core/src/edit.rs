@@ -83,6 +83,9 @@ pub struct Clipboard {
 /// One edit: at `start`, `removed` was replaced by `inserted`.
 #[derive(Debug, Clone)]
 struct Change {
+    /// The audio state this edit leads to. Never reused, unlike positions:
+    /// an edit after undo replaces the redo branch at the same position.
+    id: u64,
     start: usize,
     removed: Stereo,
     inserted: Stereo,
@@ -143,6 +146,13 @@ pub struct Session {
     pos: usize,
     /// Samples the history may hold before it drops old edits.
     cap: usize,
+    /// The audio state at `base`: 0 for the audio as loaded, else the id of
+    /// the last edit dropped from the history.
+    base_state: u64,
+    /// The id the next edit gets.
+    next_id: u64,
+    /// The audio state written to the card.
+    saved: u64,
 }
 
 impl Session {
@@ -153,7 +163,46 @@ impl Session {
             base: 0,
             pos: 0,
             cap: HISTORY_SAMPLES,
+            base_state: 0,
+            next_id: 1,
+            saved: 0,
         }
+    }
+
+    /// An id for the current audio. Two positions in the history can hold
+    /// different audio over time; two states never share an id.
+    pub fn state(&self) -> u64 {
+        self.state_at(self.pos).unwrap_or(self.base_state)
+    }
+
+    /// The state id at history position `pos`, if the history holds it.
+    pub fn state_at(&self, pos: usize) -> Option<u64> {
+        if pos == self.base {
+            return Some(self.base_state);
+        }
+        self.history.get(pos.checked_sub(self.base + 1)?).map(|c| c.id)
+    }
+
+    /// Record that the current audio is what the card holds.
+    pub fn mark_saved(&mut self) {
+        self.saved = self.state();
+    }
+
+    /// True if the current audio is what the card holds.
+    pub fn matches_saved(&self) -> bool {
+        self.state() == self.saved
+    }
+
+    /// The history position holding the saved audio, if undo or redo can
+    /// still reach it. An edit after undo, or trimming, can drop it.
+    pub fn saved_position(&self) -> Option<usize> {
+        if self.base_state == self.saved {
+            return Some(self.base);
+        }
+        self.history
+            .iter()
+            .position(|c| c.id == self.saved)
+            .map(|i| self.base + i + 1)
     }
 
     pub fn audio(&self) -> &Stereo {
@@ -406,10 +455,12 @@ impl Session {
             replace(&mut self.audio, start, removed.len(), &audio);
             self.history.truncate(self.pos - self.base);
             self.history.push(Change {
+                id: self.next_id,
                 start,
                 removed,
                 inserted: audio,
             });
+            self.next_id += 1;
             self.pos += 1;
             self.trim();
         }
@@ -426,7 +477,9 @@ impl Session {
         let mut total: usize = self.history.iter().map(Change::samples).sum();
         // Always keep the latest edit, so it can be undone.
         while total > self.cap && self.history.len() > 1 {
-            total -= self.history.remove(0).samples();
+            let dropped = self.history.remove(0);
+            total -= dropped.samples();
+            self.base_state = dropped.id;
             self.base += 1;
         }
     }
@@ -704,6 +757,24 @@ mod tests {
         s.apply(&m1, 0, 0, Op::GainDb(-3.0)).unwrap();
         assert_eq!(s.position(), 2);
         assert!(s.seek(3).is_err());
+    }
+
+    #[test]
+    fn saved_state_survives_undo_but_not_a_new_branch() {
+        let (mut s, m) = three();
+        assert!(s.matches_saved());
+        s.apply(&m, 0, 0, Op::GainDb(-6.0)).unwrap();
+        assert!(!s.matches_saved());
+        s.mark_saved();
+        assert_eq!(s.saved_position(), Some(1));
+        s.seek(0).unwrap();
+        assert!(!s.matches_saved());
+        assert_eq!(s.saved_position(), Some(1));
+        // A different edit at the same position is not the saved audio.
+        s.apply(&m, 1, 1, Op::GainDb(-6.0)).unwrap();
+        assert_eq!(s.position(), 1);
+        assert!(!s.matches_saved());
+        assert_eq!(s.saved_position(), None);
     }
 
     #[test]

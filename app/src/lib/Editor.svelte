@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, untrack } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { open as openDialog } from "@tauri-apps/plugin-dialog";
+  import { ask, open as openDialog } from "@tauri-apps/plugin-dialog";
   import Thumb from "./Thumb.svelte";
   import Waveform from "./Waveform.svelte";
   import {
@@ -67,8 +67,13 @@
   // Audio edits happen in the app's Rust side. These track its history.
   let audioPos = $state(0);
   let oldestPos = $state(0);
-  /** The history position whose audio is on the card. */
-  let savedPos = $state(0);
+  /** Id of the current audio, from the Rust side. Positions get reused
+   *  when an edit follows an undo; state ids never do. */
+  let audioState = $state(0);
+  /** Id of the audio on the card. */
+  let savedState = $state(0);
+  /** The history position holding the card's audio, or null if undo can't reach it. */
+  let savedAt = $state<number | null>(0);
   /** A command that changes audio is running. */
   let busy = $state(false);
   /** Splices picked in the list. Null means the one under the cursor. */
@@ -100,7 +105,7 @@
   const sameMarkers = (a: number[], b: number[]) => a.length === b.length && a.every((m, i) => m === b[i]);
 
   $effect(() => {
-    dirty = audioPos !== savedPos || !sameMarkers(markers, saved);
+    dirty = audioState !== savedState || !sameMarkers(markers, saved);
   });
 
   $effect(() => {
@@ -224,6 +229,8 @@
   function applyAudio(r: EditResult) {
     audioPos = r.pos;
     oldestPos = r.oldest;
+    audioState = r.state;
+    savedAt = r.savedPos;
     if (!r.spans.length || !reel) return;
     stop();
     const { left, right } = applySpans(reel.left, reel.right, r.spans);
@@ -233,8 +240,15 @@
     preview = makePreview(reel);
   }
 
-  /** Locks move with their audio: those after the edit shift, those inside go. */
-  function shiftLocks(r: EditResult, next: number[]) {
+  /**
+   * Locks move with their audio. When an edit keeps the splices in order
+   * and their count the same, each lock follows its marker by index.
+   * Otherwise locks after the edit shift and those inside it go.
+   */
+  function shiftLocks(r: EditResult, next: number[], keepOrder: boolean) {
+    if (keepOrder && next.length === markers.length) {
+      return new Set(markers.flatMap((m, i) => (locked.has(m) ? [next[i]] : [])));
+    }
     const s = r.spans[0];
     if (!s) return locked;
     const delta = s.left.length - s.removed;
@@ -253,6 +267,7 @@
     call: () => Promise<EditResult>,
     after: (added: number) => { first: number; last: number } | null,
     focus: number,
+    keepOrder = false,
   ) {
     if (busy || saving || !reel) return;
     busy = true;
@@ -260,13 +275,13 @@
       const before = snapshot();
       const r = await call();
       const next = r.markers ?? markers;
-      if (r.pos === audioPos && sameMarkers(next, markers)) {
+      if (r.state === audioState && sameMarkers(next, markers)) {
         notify("That made no change.");
         return;
       }
       const added = next.length - markers.length;
       pushUndo(before);
-      locked = shiftLocks(r, next);
+      locked = shiftLocks(r, next, keepOrder);
       applyAudio(r);
       markers = next;
       selectedMarker = null;
@@ -296,6 +311,7 @@
         return { first, last };
       },
       first,
+      !["moveTo", "shuffle", "delete", "duplicate"].includes(op.kind),
     );
   }
 
@@ -420,7 +436,9 @@
       redoStack = [];
       audioPos = 0;
       oldestPos = 0;
-      savedPos = 0;
+      audioState = 0;
+      savedState = 0;
+      savedAt = 0;
       picked = null;
       cursor = 0;
       selectedMarker = null;
@@ -551,13 +569,23 @@
 
   async function revert() {
     if (busy || saving) return;
+    if (savedAt === null) {
+      // An edit after undo replaced the saved audio in the history, so
+      // read it back from the card. That starts a fresh undo history.
+      const ok = await ask("Revert reads the reel back from the card and clears undo. Continue?", {
+        title: "Revert",
+        kind: "warning",
+      });
+      if (ok) await load();
+      return;
+    }
     const before = snapshot();
     busy = true;
     try {
       await restore({
         markers: saved,
         locked: [...locked].filter((m) => saved.includes(m)),
-        audio: savedPos,
+        audio: savedAt,
       });
       pushUndo(before);
     } catch (e) {
@@ -622,10 +650,12 @@
     saving = true;
     const sent = markers.slice();
     const pos = audioPos;
+    const state = audioState;
     try {
       const updated = await saveReel(root, slot.index, sent);
       saved = sent;
-      savedPos = pos;
+      savedState = state;
+      savedAt = pos;
       onsaved(updated);
       notify(`Saved ${sent.length + 1} splices to ${slot.fileName}`);
     } catch (e) {
