@@ -104,6 +104,10 @@ export type EditResult = {
   /** History position after the edit, and the oldest one undo can reach. */
   pos: number;
   oldest: number;
+  /** Id of the audio now; never reused, unlike positions. */
+  state: number;
+  /** The position holding the audio on the card, or null if undo can't reach it. */
+  savedPos: number | null;
   /** New markers, or null when the caller already knows them (undo, redo). */
   markers: number[] | null;
   spans: Span[];
@@ -119,6 +123,8 @@ export function parseEdit(buffer: ArrayBuffer): EditResult {
   };
   const pos = u32();
   const oldest = u32();
+  const state = u32();
+  const saved = u32();
   const hasMarkers = u32() === 1;
   const markers = Array.from({ length: u32() }, u32);
   const heads = Array.from({ length: u32() }, () => ({ start: u32(), removed: u32(), inserted: u32() }));
@@ -130,7 +136,7 @@ export function parseEdit(buffer: ArrayBuffer): EditResult {
     at += h.inserted * 4;
     return { start: h.start, removed: h.removed, left, right };
   });
-  return { pos, oldest, markers: hasMarkers ? markers : null, spans };
+  return { pos, oldest, state, savedPos: saved === 0xffffffff ? null : saved, markers: hasMarkers ? markers : null, spans };
 }
 
 /** Apply spans in order to copies of the channels. */

@@ -148,8 +148,6 @@ struct OpenReel {
     session: Session,
     /// `ReelFile::audio_id` of the file on the card when last read or written.
     disk_id: u64,
-    /// The history position whose audio matches the card.
-    disk_pos: usize,
 }
 
 #[derive(Default)]
@@ -204,22 +202,45 @@ async fn load_reel(
         index,
         session: Session::new(Stereo::new(reel.left, reel.right)),
         disk_id,
-        disk_pos: 0,
     });
     Ok(Response::new(out))
 }
 
+/// Where the history stands after a command, for the editor.
+struct Status {
+    pos: usize,
+    oldest: usize,
+    /// Id of the current audio state.
+    state: u64,
+    /// The position holding the audio on the card, if undo or redo reach it.
+    saved_pos: Option<usize>,
+}
+
+impl Status {
+    fn of(s: &Session) -> Status {
+        Status {
+            pos: s.position(),
+            oldest: s.oldest(),
+            state: s.state(),
+            saved_pos: s.saved_position(),
+        }
+    }
+}
+
 /// An edit's result. Layout, little-endian u32s unless noted: history
-/// position, oldest reachable position, 1 if markers follow (else 0), the
-/// marker count and markers, the span count, then for each span its start,
-/// frames removed, frames inserted, and the inserted left then right
-/// samples as f32.
-fn edit_result(pos: usize, oldest: usize, markers: Option<&[u32]>, spans: &[Span]) -> Response {
+/// position, oldest reachable position, current state id, the position of
+/// the saved audio (u32::MAX if unreachable), 1 if markers follow (else 0),
+/// the marker count and markers, the span count, then for each span its
+/// start, frames removed and frames inserted, then each span's inserted
+/// left then right samples as f32.
+fn edit_result(status: Status, markers: Option<&[u32]>, spans: &[Span]) -> Response {
     let samples: usize = spans.iter().map(|s| s.inserted.len() * 2).sum();
-    let mut out = Vec::with_capacity(24 + markers.map_or(0, <[u32]>::len) * 4 + spans.len() * 12 + samples * 4);
+    let mut out = Vec::with_capacity(32 + markers.map_or(0, <[u32]>::len) * 4 + spans.len() * 12 + samples * 4);
     let mut put = |v: u32| out.extend_from_slice(&v.to_le_bytes());
-    put(pos as u32);
-    put(oldest as u32);
+    put(status.pos as u32);
+    put(status.oldest as u32);
+    put(status.state as u32);
+    put(status.saved_pos.map_or(u32::MAX, |p| p as u32));
     put(markers.is_some() as u32);
     let markers = markers.unwrap_or_default();
     put(markers.len() as u32);
@@ -300,7 +321,7 @@ async fn edit_reel(
         } else {
             Vec::new()
         };
-        Ok(edit_result(s.position(), s.oldest(), Some(&markers), &spans))
+        Ok(edit_result(Status::of(s), Some(&markers), &spans))
     })
 }
 
@@ -343,7 +364,7 @@ async fn paste_splices(
         let s = &mut open.session;
         let markers = s.paste(&markers, at, &clip).map_err(err)?;
         let spans: Vec<Span> = s.last_span().into_iter().collect();
-        Ok(edit_result(s.position(), s.oldest(), Some(&markers), &spans))
+        Ok(edit_result(Status::of(s), Some(&markers), &spans))
     })
 }
 
@@ -371,7 +392,7 @@ async fn insert_files(
         let s = &mut open.session;
         let markers = s.insert(&markers, at, &pieces).map_err(err)?;
         let spans: Vec<Span> = s.last_span().into_iter().collect();
-        Ok(edit_result(s.position(), s.oldest(), Some(&markers), &spans))
+        Ok(edit_result(Status::of(s), Some(&markers), &spans))
     })
 }
 
@@ -401,7 +422,7 @@ async fn put_file(
         } else {
             Vec::new()
         };
-        Ok(edit_result(s.position(), s.oldest(), Some(&markers), &spans))
+        Ok(edit_result(Status::of(s), Some(&markers), &spans))
     })
 }
 
@@ -454,9 +475,20 @@ async fn seek_history(
     pos: usize,
 ) -> CmdResult<Response> {
     with_open(&editing, &root, index, |open| {
-        let oldest = open.session.oldest();
+        // Work out the status first: the spans borrow the session.
+        let s = &open.session;
+        let status = Status {
+            pos,
+            oldest: s.oldest(),
+            state: s.state_at(pos).ok_or(if pos < s.oldest() {
+                "that edit is too old to undo: the history keeps about 380 MB"
+            } else {
+                "nothing to redo"
+            })?,
+            saved_pos: s.saved_position(),
+        };
         let spans = open.session.seek(pos).map_err(err)?;
-        Ok(edit_result(pos, oldest, None, &spans))
+        Ok(edit_result(status, None, &spans))
     })
 }
 
@@ -489,7 +521,7 @@ async fn save_reel<R: Runtime>(
         let frames = s.frames() as u32;
         let markers = reel::clean_markers(markers, frames);
         check_limits(frames, markers.len())?;
-        let bytes = if s.position() == open.disk_pos && reel::is_morphagene_format(&format) {
+        let bytes = if s.matches_saved() && reel::is_morphagene_format(&format) {
             file.set_markers(&markers);
             file.to_bytes()
         } else {
@@ -505,7 +537,7 @@ async fn save_reel<R: Runtime>(
         card.write_slot(index, &bytes, &backup_dir(&app, &card)?)
             .map_err(err)?;
         open.disk_id = ReelFile::parse(&bytes).map_err(err)?.audio_id();
-        open.disk_pos = s.position();
+        open.session.mark_saved();
         Ok(card.slots().swap_remove(index).into())
     })
 }
@@ -920,6 +952,8 @@ mod tests {
         };
         let pos = u32_();
         let oldest = u32_();
+        let _state = u32_();
+        let _saved_pos = u32_();
         let has = u32_() == 1;
         let n = u32_();
         let markers: Vec<u32> = (0..n).map(|_| u32_()).collect();
@@ -1071,6 +1105,21 @@ mod tests {
         assert!((saved.left[0] - 0.05).abs() < 1e-4);
         assert_eq!(saved.left[4800], 0.3);
         assert!((saved.left[23999] - 0.05).abs() < 1e-4);
+
+        // Save, undo, then a different edit at the same history position:
+        // the next save must write that edit's audio, not keep the card's.
+        call(&w, "seek_history", args(serde_json::json!({ "pos": 2 }))).unwrap();
+        let (pos, ..) = decode(&raw(call(
+            &w,
+            "edit_reel",
+            args(serde_json::json!({ "markers": [4800], "first": 1, "last": 1, "op": { "kind": "gain", "db": -20.0 } })),
+        )
+        .unwrap()));
+        assert_eq!(pos, 3);
+        call(&w, "save_reel", args(serde_json::json!({ "markers": [4800] }))).unwrap();
+        let saved = Reel::open(&card.slot_path(0)).unwrap();
+        assert_eq!(saved.frames(), 19200);
+        assert!((saved.left[4800] - 0.03).abs() < 1e-4, "{}", saved.left[4800]);
 
         // A different file in the slot makes save refuse.
         std::fs::write(card.slot_path(0), reel.to_wav_bytes().unwrap()).unwrap();

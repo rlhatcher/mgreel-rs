@@ -14,6 +14,8 @@ export const SPEED_DOWN = -26;
 /** How far ahead the next splice is queued, in seconds. */
 const LOOKAHEAD = 0.2;
 const TICK_MS = 25;
+/** Most splices queued per tick, so one-frame splices can't flood the graph. */
+const MAX_PER_TICK = 32;
 
 type Voice = {
   source: AudioBufferSourceNode;
@@ -79,6 +81,7 @@ export class Preview {
       const start = inside ? from : this.reverse ? r.end : r.start;
       this.voice(start, this.reverse ? r.start : r.end, splice, now);
       this.timer = setInterval(() => this.tick(), TICK_MS);
+      this.tick();
     }
   }
 
@@ -159,15 +162,19 @@ export class Preview {
     this.voices.push(v);
   }
 
+  /** Queue splices until the lookahead is full. Splices shorter than a
+   *  tick need several per tick to play without gaps. */
   private tick() {
     const splices = this.splices();
-    const last = this.voices.at(-1);
-    if (!this.ctx || !last || last.splice === null) return;
-    if (last.until - this.ctx.currentTime > LOOKAHEAD) return;
-    if (!splices.length) return;
-    const i = Math.max(0, Math.min(splices.length - 1, this.next(last.splice)));
-    const r = splices[i];
-    if (this.reverse) this.voice(r.end, r.start, i, last.until);
-    else this.voice(r.start, r.end, i, last.until);
+    if (!this.ctx || !splices.length) return;
+    for (let n = 0; n < MAX_PER_TICK; n++) {
+      const last = this.voices.at(-1);
+      if (!last || last.splice === null) return;
+      if (last.until - this.ctx.currentTime > LOOKAHEAD) return;
+      const i = Math.max(0, Math.min(splices.length - 1, this.next(last.splice)));
+      const r = splices[i];
+      if (this.reverse) this.voice(r.end, r.start, i, last.until);
+      else this.voice(r.start, r.end, i, last.until);
+    }
   }
 }

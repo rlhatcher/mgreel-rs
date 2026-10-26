@@ -144,9 +144,12 @@
 
   function spectrumImage(color: (name: string) => string) {
     const columns = Math.max(1, Math.ceil(width / 2));
-    const stops = [rgb(color("--panel")), rgb(color("--accent")), rgb(color("--text"))];
-    const key = `${viewStart}:${viewEnd}:${columns}:${stops.join()}`;
+    // Key on the CSS strings; convert them only on a miss, since draw()
+    // runs every frame during playback.
+    const names = [color("--panel"), color("--accent"), color("--text")];
+    const key = `${viewStart}:${viewEnd}:${columns}:${names.join()}`;
     if (specCache && specCache.key === key && specCache.left === left) return specCache.image;
+    const stops = names.map(rgb);
     const levels = spectrogram(left, right, viewStart, viewEnd, columns, SPEC_ROWS);
     const image = document.createElement("canvas");
     image.width = columns;
