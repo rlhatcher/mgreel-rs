@@ -226,6 +226,7 @@ async fn auto_slice(
     min_seconds: f32,
     max_seconds: Option<f32>,
     max_markers: usize,
+    keep: Vec<u32>,
 ) -> CmdResult<Vec<u32>> {
     check_slot(index)?;
     let reel = Reel::open(&Card::new(root).slot_path(index)).map_err(err)?;
@@ -238,7 +239,7 @@ async fn auto_slice(
         max_seconds,
         max_markers,
     };
-    Ok(slice::auto_slice(&reel.left, &reel.right, options))
+    Ok(slice::auto_slice_keeping(&reel.left, &reel.right, options, &keep))
 }
 
 fn check_limits(frames: u32, markers: usize) -> CmdResult<()> {
