@@ -17,5 +17,5 @@ Thumbs.db
 
 # Test files
 *.wav
-!test/*.wav
+!crates/*/tests/fixtures/*.wav
 

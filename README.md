@@ -26,10 +26,22 @@ The binary will be available at `target/release/mgreel`
 ### Install globally
 
 ```bash
-cargo install --locked --git https://github.com/rlhatcher/mgreel-rs.git
+cargo install --locked --git https://github.com/rlhatcher/mgreel-rs.git mgreel-rs
 ```
 
-Or `cargo install --locked --path .` from a checkout.
+Or `cargo install --locked --path crates/mgreel-cli` from a checkout.
+
+## Layout
+
+The repo is a Cargo workspace:
+
+- `crates/mgreel-core`: library for reels (WAV and `cue ` chunk I/O,
+  resampling, splice markers, limit checks, auto-slicing at phrase or
+  gesture level from level and spectrum alone, so it suits found sound and
+  field recordings as well as music), the SD card (32 slots, swap,
+  reorder, backup, restore) and `options.txt` (edits change only the value,
+  as the manual asks).
+- `crates/mgreel-cli`: the `mgreel` binary, package name `mgreel-rs`.
 
 ## Usage
 
@@ -53,13 +65,15 @@ mgreel --out morphagene-reel.wav samples/*.wav
 
 ## How it works
 
-1. Reads each input WAV file
-2. Converts to 32-bit float samples
+1. Reads each input WAV file (8, 16, 24 or 32-bit PCM, or 32/64-bit float)
+2. Converts to 32-bit float samples, scaled by the source's bit depth
 3. Resamples to 48kHz if necessary
 4. Converts mono to stereo (duplicates channel)
 5. Concatenates all samples
 6. Adds cue points at splice boundaries
 7. Writes final WAV file with proper Morphagene format
+8. Warns if the reel is over 2.9 minutes or has more than 299 markers, the
+   Morphagene's limits
 
 ## Dependencies
 

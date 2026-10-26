@@ -1,22 +1,25 @@
-[package]
-name = "mgreel-rs"
-version = "1.0.0"
+[workspace]
+members = ["crates/mgreel-core", "crates/mgreel-cli", "app/src-tauri"]
+resolver = "2"
+
+[workspace.package]
+version = "1.1.0"
 edition = "2021"
 authors = ["rlhatcher <ronaldhatcher@mac.com>"]
 license = "ISC"
-description = "Convert Wave files to Make Noise Morphagene reel format (Rust port)"
 repository = "https://github.com/rlhatcher/mgreel-rs"
-keywords = ["audio", "wav", "morphagene", "eurorack", "music"]
-categories = ["command-line-utilities", "multimedia::audio"]
-readme = "README.md"
 
-[[bin]]
-name = "mgreel"
-path = "src/main.rs"
-
-[dependencies]
-clap = { version = "4.5", features = ["derive"] }
+[workspace.dependencies]
+anyhow = "1.0"
 hound = "3.5"
 rubato = "0.15"
-anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+mgreel-core = { path = "crates/mgreel-core" }
 
+# From the Tauri template: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
