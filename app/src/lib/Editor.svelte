@@ -487,7 +487,9 @@
     const pos = preview?.position();
     if (!pos) return;
     playhead = pos.frame;
-    playingSplice = pos.splice;
+    // Playing through the reel has no queued splice; mark the one under it.
+    playingSplice = pos.splice ?? spliceAt(pos.frame);
+    waveform?.keepInView(pos.frame);
     raf = requestAnimationFrame(follow);
   }
 
@@ -833,6 +835,9 @@
       <button class="primary" onclick={() => (playing ? stop() : play())}>
         {playing ? "Stop" : "Play"}
       </button>
+      <span class="num readout time" class:live={playhead !== null} title="Playhead, or the cursor when stopped">
+        {formatTime(playhead ?? cursor)}
+      </span>
       <select
         value={mode}
         onchange={(e) => ((mode = e.currentTarget.value as PreviewMode), restart())}
@@ -1231,7 +1236,7 @@
     min-width: 48px;
   }
   tr.playing td:first-child {
-    box-shadow: inset 3px 0 0 var(--accent);
+    box-shadow: inset 3px 0 0 var(--playhead);
   }
   tr.picked td {
     background: var(--select);
@@ -1254,5 +1259,13 @@
     outline: 2px dashed var(--accent);
     outline-offset: 4px;
     border-radius: 8px;
+  }
+  .time {
+    min-width: 72px;
+    color: var(--muted);
+  }
+  .time.live {
+    color: var(--playhead);
+    font-weight: 600;
   }
 </style>

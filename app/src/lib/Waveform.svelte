@@ -244,24 +244,49 @@
     ctx.fillStyle = color("--muted");
     ctx.fillRect(Math.round(toX(cursor)), 0, 1, HEIGHT);
     if (playhead !== null) {
-      ctx.fillStyle = color("--text");
-      ctx.fillRect(Math.round(toX(playhead)), 0, 2, HEIGHT);
+      // A 2 px line on a background-coloured band, so it shows over the
+      // waveform and the spectrogram, with a handle at each edge.
+      const x = Math.round(toX(playhead));
+      ctx.fillStyle = color("--panel");
+      ctx.fillRect(x - 2, 0, 6, HEIGHT);
+      ctx.fillStyle = color("--playhead");
+      ctx.fillRect(x, 0, 2, HEIGHT);
+      const h = HANDLE_PX + 1;
+      ctx.beginPath();
+      ctx.moveTo(x + 1 - h, 0);
+      ctx.lineTo(x + 1 + h, 0);
+      ctx.lineTo(x + 1, h + 2);
+      ctx.moveTo(x + 1 - h, HEIGHT);
+      ctx.lineTo(x + 1 + h, HEIGHT);
+      ctx.lineTo(x + 1, HEIGHT - h - 2);
+      ctx.fill();
     }
   }
 
-  let frame = 0;
+  // At most one draw per frame. Cancelling and re-requesting instead would
+  // starve it during playback: the editor moves the playhead from its own
+  // frame callback, which can run first and cancel the draw due that frame.
+  let pending = false;
+  function scheduleDraw() {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      draw();
+    });
+  }
+
   $effect(() => {
     // Track everything draw() reads.
     void [width, viewStart, viewEnd, markers.length, ...markers, cursor, playhead, selectedMarker, blocks, locked, spectrum];
-    cancelAnimationFrame(frame);
-    frame = requestAnimationFrame(draw);
+    scheduleDraw();
   });
 
   onMount(() => {
     const resize = new ResizeObserver(([entry]) => (width = Math.max(100, Math.floor(entry.contentRect.width))));
     resize.observe(canvas.parentElement!);
     const scheme = matchMedia("(prefers-color-scheme: dark)");
-    const redraw = () => requestAnimationFrame(draw);
+    const redraw = () => scheduleDraw();
     scheme.addEventListener("change", redraw);
     return () => {
       resize.disconnect();
@@ -353,6 +378,14 @@
   export function fit() {
     viewStart = 0;
     viewEnd = Math.max(1, frames);
+  }
+
+  /** Page the view along when the playhead leaves it, so it stays in sight
+   *  while zoomed in. It lands a tenth of the way in from the edge it enters. */
+  export function keepInView(frame: number) {
+    const span = viewEnd - viewStart;
+    if (frame > viewEnd) pan(frame - viewStart - span * 0.1);
+    else if (frame < viewStart) pan(frame - viewStart - span * 0.9);
   }
 
   /** Scroll so `frame` is visible. */
