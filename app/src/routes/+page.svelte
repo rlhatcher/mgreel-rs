@@ -78,16 +78,19 @@
   async function openFolder() {
     const dir = await open({ directory: true, title: "Open a card or a folder of reels" });
     if (typeof dir !== "string") return;
+    if (!(await leaveEditor())) return;
     manual = { root: dir, label: dir.split("/").pop() || dir };
-    root = dir;
+    switchTo(dir);
   }
 
   async function chooseCard(next: string) {
-    if (await leaveEditor()) {
-      root = next;
-      editing = null;
-      if (tab === "editor") tab = "library";
-    }
+    if (await leaveEditor()) switchTo(next);
+  }
+
+  function switchTo(next: string) {
+    root = next;
+    editing = null;
+    if (tab === "editor") tab = "library";
   }
 
   onMount(() => {
