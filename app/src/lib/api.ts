@@ -20,7 +20,7 @@ export type Slot = {
   problems: string[];
 };
 
-export type LoadedReel = { markers: number[]; left: Float32Array; right: Float32Array };
+export type LoadedReel = { markers: number[]; audioId: string; left: Float32Array; right: Float32Array };
 
 export type Source = { path: string; name: string; frames: number; error: string | null };
 
@@ -63,19 +63,22 @@ export async function loadReel(root: string, index: number): Promise<LoadedReel>
   const buffer = await invoke<ArrayBuffer>("load_reel", { root, index });
   const view = new DataView(buffer);
   const count = view.getUint32(0, true);
-  const markers = Array.from({ length: count }, (_, i) => view.getUint32(4 + i * 4, true));
+  const audioId = view.getBigUint64(4, true).toString();
+  const markers = Array.from({ length: count }, (_, i) => view.getUint32(12 + i * 4, true));
   // The header is a whole number of u32s, so the samples are 4-byte aligned.
-  const offset = 4 + count * 4;
+  const offset = 12 + count * 4;
   const frames = (buffer.byteLength - offset) / 8;
   return {
     markers,
+    audioId,
     left: new Float32Array(buffer, offset, frames),
     right: new Float32Array(buffer, offset + frames * 4, frames),
   };
 }
 
-export const saveMarkers = (root: string, index: number, markers: number[]) =>
-  invoke<Slot>("save_markers", { root, index, markers });
+/** `audioId` comes from `loadReel`. The save fails if the reel's audio differs. */
+export const saveMarkers = (root: string, index: number, markers: number[], audioId: string) =>
+  invoke<{ slot: Slot; audioId: string }>("save_markers", { root, index, markers, audioId });
 export type SliceMode = "phrases" | "gestures";
 export const autoSlice = (
   root: string,

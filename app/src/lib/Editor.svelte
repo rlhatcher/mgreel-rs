@@ -193,11 +193,13 @@
   }
 
   async function save() {
+    if (!reel) return;
     saving = true;
     try {
-      const updated = await saveMarkers(root, slot.index, markers);
+      const updated = await saveMarkers(root, slot.index, markers, reel.audioId);
+      reel.audioId = updated.audioId;
       saved = markers.slice();
-      onsaved(updated);
+      onsaved(updated.slot);
       notify(`Saved ${markers.length + 1} splices to ${slot.fileName}`);
     } catch (e) {
       notify(errorText(e), true);

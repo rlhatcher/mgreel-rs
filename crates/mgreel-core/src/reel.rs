@@ -6,6 +6,7 @@ use hound::{WavSpec, WavWriter};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
+use std::hash::{DefaultHasher, Hasher};
 use std::path::Path;
 
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -127,8 +128,10 @@ impl Reel {
     }
 
     pub fn open(path: &Path) -> Result<Reel> {
-        let bytes = std::fs::read(path)?;
-        let file = ReelFile::parse(&bytes)?;
+        Reel::from_file(&ReelFile::open(path)?)
+    }
+
+    pub fn from_file(file: &ReelFile) -> Result<Reel> {
         let (left, right) = file.decode()?;
         let markers = file.markers();
         let format = file.format()?;
@@ -296,6 +299,18 @@ impl ReelFile {
         Ok((data / self.format()?.frame_bytes().max(1)) as u32)
     }
 
+    /// A hash of the format and audio. Markers live in other chunks, so
+    /// saving markers keeps it the same, and a different reel at the same
+    /// path almost certainly changes it. Only compare values from the same
+    /// build: the hash isn't stable across Rust versions.
+    pub fn audio_id(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for id in [b"fmt ", b"data"] {
+            hasher.write(self.chunk(id).map_or(&[][..], |c| &c.data));
+        }
+        hasher.finish()
+    }
+
     pub fn markers(&self) -> Vec<u32> {
         self.chunk(b"cue ")
             .map(|c| riff::decode_cues(&c.data))
@@ -429,6 +444,26 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reel_file(samples: &[f32]) -> ReelFile {
+        let clip = Clip {
+            left: samples.to_vec(),
+            right: samples.to_vec(),
+        };
+        let bytes = Reel::build(vec![clip], BuildOptions::default())
+            .to_wav_bytes()
+            .unwrap();
+        ReelFile::parse(&bytes).unwrap()
+    }
+
+    #[test]
+    fn audio_id_follows_the_audio_not_the_markers() {
+        let mut file = reel_file(&[0.1, 0.2, 0.3, 0.4]);
+        let id = file.audio_id();
+        file.set_markers(&[2]);
+        assert_eq!(file.audio_id(), id);
+        assert_ne!(reel_file(&[0.1, 0.2, 0.3, 0.5]).audio_id(), id);
+    }
 
     #[test]
     fn splice_ranges_cover_the_reel() {
