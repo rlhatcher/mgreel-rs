@@ -94,7 +94,8 @@ export type EditOp =
   | { kind: "fadeOut"; ms: number }
   | { kind: "smoothLoop"; ms: number }
   | { kind: "removeDc" }
-  | { kind: "highPass"; hz: number };
+  | { kind: "highPass"; hz: number }
+  | { kind: "speed"; semitones: number };
 
 /** At `start`, drop `removed` frames and put these samples in. */
 export type Span = { start: number; removed: number; left: Float32Array; right: Float32Array };

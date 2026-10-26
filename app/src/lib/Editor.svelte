@@ -80,6 +80,8 @@
   let fadeMs = $state(10);
   let loopMs = $state(20);
   let highPassHz = $state(40);
+  let speedSt = $state(-12);
+  let spectrum = $state(false);
   /** Sound On Sound balance for mixing a file in, in percent: 0 is only the file. */
   let sos = $state(50);
   let dropping = $state(false);
@@ -790,6 +792,9 @@
       </button>
       <button onclick={removeSelected} disabled={selectedMarker === null} title="Delete">Delete marker</button>
       <span class="spacer"></span>
+      <label title="Show frequency over time instead of the waveform">
+        <input type="checkbox" bind:checked={spectrum} /> Spectrogram
+      </label>
       <button onclick={() => waveform?.zoom(0.5)} title="Zoom out (-)">−</button>
       <button onclick={() => waveform?.fit()} title="Show all (0)">Fit</button>
       <button onclick={() => waveform?.zoom(2)} title="Zoom in (+)">+</button>
@@ -861,6 +866,7 @@
       bind:cursor
       bind:selectedMarker
       {locked}
+      {spectrum}
       {playhead}
       onseek={(f) => playing && play(f)}
       onadd={addMarker}
@@ -984,6 +990,17 @@
           <input type="number" min="5" max="2000" step="5" bind:value={highPassHz} /> Hz
           <button onclick={() => runEdit({ kind: "highPass", hz: highPassHz })} disabled={busy}>
             High-pass
+          </button>
+        </div>
+
+        <div class="row">
+          <input type="number" min="-36" max="36" step="1" bind:value={speedSt} /> st
+          <button
+            onclick={() => runEdit({ kind: "speed", semitones: speedSt })}
+            disabled={busy || speedSt === 0}
+            title="Like tape: pitch and length change together. +12 is an octave up and half as long."
+          >
+            Change speed
           </button>
         </div>
 

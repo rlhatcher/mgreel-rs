@@ -256,6 +256,7 @@ enum EditOp {
     SmoothLoop { ms: f32 },
     RemoveDc,
     HighPass { hz: f32 },
+    Speed { semitones: f32 },
 }
 
 impl From<EditOp> for Op {
@@ -274,6 +275,7 @@ impl From<EditOp> for Op {
             EditOp::SmoothLoop { ms } => Op::SmoothLoopMs(ms),
             EditOp::RemoveDc => Op::RemoveDc,
             EditOp::HighPass { hz } => Op::HighPassHz(hz),
+            EditOp::Speed { semitones } => Op::SpeedSemitones(semitones),
         }
     }
 }

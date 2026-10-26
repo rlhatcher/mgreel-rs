@@ -415,7 +415,16 @@ impl Peaks {
 }
 
 fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>> {
-    if from_rate == to_rate || samples.is_empty() {
+    if from_rate == to_rate {
+        return Ok(samples.to_vec());
+    }
+    resample_by(samples, to_rate as f64 / from_rate as f64)
+}
+
+/// Resample to `ratio` times as many samples. Above 1 the sound gets
+/// longer and lower when played at the same rate, like slowed tape.
+pub(crate) fn resample_by(samples: &[f32], ratio: f64) -> Result<Vec<f32>> {
+    if ratio == 1.0 || samples.is_empty() {
         return Ok(samples.to_vec());
     }
 
@@ -429,7 +438,6 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>> {
 
     // A single chunk stops half a filter length short of the input's end,
     // so pad with silence to get the tail out, then cut to length.
-    let ratio = to_rate as f64 / from_rate as f64;
     let wanted = (samples.len() as f64 * ratio).round() as usize;
     let mut padded = samples.to_vec();
     padded.resize(samples.len() + params.sinc_len, 0.0);
