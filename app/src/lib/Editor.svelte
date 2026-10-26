@@ -79,7 +79,15 @@
   /** Splices picked in the list. Null means the one under the cursor. */
   let picked = $state<{ first: number; last: number } | null>(null);
   let anchor = 0;
-  let dragFrom: number | null = null;
+  // Rows move with pointer events, not HTML5 drag and drop, because the
+  // Tauri window takes drag events for its own file drop.
+  /** A press on a splice row. It turns into a drag once the pointer moves. */
+  let press: { index: number; y: number } | null = null;
+  let dragFrom = $state<number | null>(null);
+  let dropTarget = $state<number | null>(null);
+  /** Set when a drag ends, so the click that follows doesn't pick a row. */
+  let dragged = false;
+  let list = $state<HTMLDivElement>();
   let gainDb = $state(-3);
   let normalizeDb = $state(-1);
   let fadeMs = $state(10);
@@ -408,15 +416,56 @@
     selectSplice(i);
   }
 
+  /** The splices a drag moves: the pick if it started there, else one row. */
+  const dragging = $derived(
+    dragFrom === null
+      ? null
+      : dragFrom >= selection.first && dragFrom <= selection.last
+        ? selection
+        : { first: dragFrom, last: dragFrom },
+  );
+
   function dropOn(target: number) {
-    if (dragFrom === null) return;
-    const from = dragFrom;
+    const sel = dragging;
     dragFrom = null;
-    const sel = from >= selection.first && from <= selection.last ? selection : { first: from, last: from };
+    if (!sel) return;
     const to = target < sel.first ? target : target > sel.last ? target + 1 : null;
     if (to === null) return;
     picked = sel;
     runEdit({ kind: "moveTo", to });
+  }
+
+  function onPointerMove(e: PointerEvent) {
+    if (!press) return;
+    if (dragFrom === null) {
+      if (Math.abs(e.clientY - press.y) < 4) return;
+      dragFrom = press.index;
+    }
+    const row = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>("tr[data-splice]");
+    dropTarget = row ? Number(row.dataset.splice) : null;
+    // Near the top or bottom edge, scroll the list to reach rows out of view.
+    if (list) {
+      const box = list.getBoundingClientRect();
+      if (e.clientY < box.top + 24) list.scrollTop -= 12;
+      else if (e.clientY > box.bottom - 24) list.scrollTop += 12;
+    }
+  }
+
+  function onPointerUp() {
+    if (!press) return;
+    press = null;
+    if (dragFrom === null) return;
+    dragged = true;
+    const target = dropTarget;
+    dropTarget = null;
+    if (target === null) dragFrom = null;
+    else dropOn(target);
+  }
+
+  function cancelDrag() {
+    press = null;
+    dragFrom = null;
+    dropTarget = null;
   }
 
   // Preview
@@ -727,6 +776,7 @@
         else play();
         break;
       case "Escape":
+        cancelDrag();
         stop();
         break;
       case "m":
@@ -791,7 +841,7 @@
   });
 </script>
 
-<svelte:window onkeydown={onKey} />
+<svelte:window onkeydown={onKey} onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={cancelDrag} />
 
 <section class:dropping>
   <header>
@@ -943,8 +993,8 @@
     </p>
 
     <div class="lower">
-      <div class="list">
-        <table>
+      <div class="list" bind:this={list}>
+        <table class:dragging={dragFrom !== null}>
           <thead>
             <tr><th>#</th><th></th><th>Start</th><th>Length</th><th>Organize</th><th></th></tr>
           </thead>
@@ -954,16 +1004,16 @@
                 class:current={i === current}
                 class:picked={i >= selection.first && i <= selection.last}
                 class:playing={i === playingSplice}
-                draggable="true"
-                onclick={(e) => pick(i, e.shiftKey)}
-                ondragstart={(e) => {
-                  dragFrom = i;
-                  e.dataTransfer?.setData("text/plain", String(i + 1));
+                class:drop-before={dragging && i === dropTarget && i < dragging.first}
+                class:drop-after={dragging && i === dropTarget && i > dragging.last}
+                data-splice={i}
+                onpointerdown={(e) => {
+                  dragged = false;
+                  if (e.button === 0) press = { index: i, y: e.clientY };
                 }}
-                ondragover={(e) => e.preventDefault()}
-                ondrop={(e) => {
-                  e.preventDefault();
-                  dropOn(i);
+                onclick={(e) => {
+                  if (dragged) dragged = false;
+                  else pick(i, e.shiftKey);
                 }}
               >
                 <td class="num">{i + 1}</td>
@@ -1197,6 +1247,17 @@
   }
   tbody tr {
     cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  table.dragging tbody tr {
+    cursor: grabbing;
+  }
+  tr.drop-before td {
+    box-shadow: inset 0 2px 0 var(--accent);
+  }
+  tr.drop-after td {
+    box-shadow: inset 0 -2px 0 var(--accent);
   }
   .tools {
     display: flex;
