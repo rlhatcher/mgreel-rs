@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, untrack } from "svelte";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
+  import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import Thumb from "./Thumb.svelte";
   import Waveform from "./Waveform.svelte";
   import {
@@ -11,9 +13,12 @@
     copySplices,
     editReel,
     errorText,
+    exportSplices,
+    insertFiles,
     formatTime,
     loadReel,
     pasteSplices,
+    putFile,
     saveReel,
     seekHistory,
     type EditOp,
@@ -75,6 +80,9 @@
   let fadeMs = $state(10);
   let loopMs = $state(20);
   let highPassHz = $state(40);
+  /** Sound On Sound balance for mixing a file in, in percent: 0 is only the file. */
+  let sos = $state(50);
+  let dropping = $state(false);
 
   const frames = $derived(reel?.left.length ?? 0);
   const splices = $derived(
@@ -233,42 +241,59 @@
     return new Set(moved.filter((m) => next.includes(m)));
   }
 
-  /** Run an edit on the selected splices. */
-  async function runEdit(op: EditOp) {
+  /**
+   * Run a command that edits the open reel, then take in its result.
+   * `after` gets how many splices were added and returns what to pick;
+   * the cursor moves to the start of splice `focus` or the pick.
+   */
+  async function edit(
+    call: () => Promise<EditResult>,
+    after: (added: number) => { first: number; last: number } | null,
+    focus: number,
+  ) {
     if (busy || saving || !reel) return;
-    const { first, last } = selection;
     busy = true;
     try {
       const before = snapshot();
-      const r = await editReel(root, slot.index, markers, first, last, op);
+      const r = await call();
       const next = r.markers ?? markers;
       if (r.pos === audioPos && sameMarkers(next, markers)) {
         notify("That made no change.");
         return;
       }
+      const added = next.length - markers.length;
       pushUndo(before);
       locked = shiftLocks(r, next);
       applyAudio(r);
       markers = next;
       selectedMarker = null;
-      const n = last - first + 1;
-      if (op.kind === "moveTo") {
-        const at = op.to < first ? op.to : op.to - n;
-        picked = { first: at, last: at + n - 1 };
-      } else if (op.kind === "delete") {
-        picked = null;
-      } else if (op.kind === "duplicate") {
-        picked = { first: last + 1, last: last + n };
-      } else {
-        picked = { first, last };
-      }
+      picked = after(added);
       const starts = [0, ...markers];
-      cursor = starts[Math.min(picked?.first ?? first, starts.length - 1)];
+      cursor = starts[Math.min(picked?.first ?? focus, starts.length - 1)];
     } catch (e) {
       notify(errorText(e), true);
     } finally {
       busy = false;
     }
+  }
+
+  /** Run an edit on the picked splices. */
+  function runEdit(op: EditOp) {
+    const { first, last } = selection;
+    const n = last - first + 1;
+    return edit(
+      () => editReel(root, slot.index, markers, first, last, op),
+      () => {
+        if (op.kind === "moveTo") {
+          const at = op.to < first ? op.to : op.to - n;
+          return { first: at, last: at + n - 1 };
+        }
+        if (op.kind === "delete") return null;
+        if (op.kind === "duplicate") return { first: last + 1, last: last + n };
+        return { first, last };
+      },
+      first,
+    );
   }
 
   async function copy() {
@@ -287,25 +312,58 @@
     if (await copy()) await runEdit({ kind: "delete" });
   }
 
-  async function paste() {
-    if (busy || saving || !reel) return;
+  /** New splices go after the picked ones. */
+  function paste() {
     const at = selection.last + 1;
-    busy = true;
+    return edit(
+      () => pasteSplices(root, slot.index, markers, at),
+      (added) => ({ first: at, last: at + added - 1 }),
+      at,
+    );
+  }
+
+  const isWav = (p: string) => /\.wave?$/i.test(p);
+
+  async function pickWavs(multiple: boolean) {
+    const chosen = await openDialog({ multiple, filters: [{ name: "WAV audio", extensions: ["wav", "wave"] }] });
+    if (!chosen) return [];
+    return Array.isArray(chosen) ? chosen : [chosen];
+  }
+
+  async function addFiles(paths?: string[]) {
+    paths ??= await pickWavs(true);
+    const wavs = paths.filter(isWav);
+    if (wavs.length < paths.length) notify("Skipped files that aren't .wav", true);
+    if (!wavs.length) return;
+    const at = selection.last + 1;
+    await edit(
+      () => insertFiles(root, slot.index, markers, at, wavs),
+      (added) => ({ first: at, last: at + added - 1 }),
+      at,
+    );
+  }
+
+  /** Replace the picked splice with a file, or mix one in at the S.O.S. balance. */
+  async function fileIntoSplice(mix: boolean) {
+    const [path] = await pickWavs(false);
+    if (!path) return;
+    const i = selection.first;
+    await edit(
+      () => putFile(root, slot.index, markers, i, path, mix ? sos / 100 : null),
+      () => ({ first: i, last: i }),
+      i,
+    );
+  }
+
+  async function exportPicked() {
+    const dir = await openDialog({ directory: true, title: "Export splices to a folder" });
+    if (typeof dir !== "string") return;
+    const { first, last } = selection;
     try {
-      const before = snapshot();
-      const r = await pasteSplices(root, slot.index, markers, at);
-      const next = r.markers ?? markers;
-      pushUndo(before);
-      locked = shiftLocks(r, next);
-      const added = next.length - markers.length;
-      applyAudio(r);
-      markers = next;
-      picked = { first: at, last: at + added - 1 };
-      cursor = [0, ...markers][at];
+      const written = await exportSplices(root, slot.index, markers, first, last, dir);
+      notify(`Exported ${written.length} splice${written.length === 1 ? "" : "s"} to ${dir}`);
     } catch (e) {
       notify(errorText(e), true);
-    } finally {
-      busy = false;
     }
   }
 
@@ -652,7 +710,22 @@
     }
   }
 
-  onMount(load);
+  onMount(() => {
+    load();
+    // WAV files dropped on the editor go in as new splices after the pick.
+    const unlisten = getCurrentWebview().onDragDropEvent((event) => {
+      const p = event.payload;
+      if (p.type === "enter" || p.type === "over") dropping = true;
+      else if (p.type === "leave") dropping = false;
+      else if (p.type === "drop") {
+        dropping = false;
+        addFiles(p.paths);
+      }
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  });
   onDestroy(() => {
     stop();
     preview?.close();
@@ -661,7 +734,7 @@
 
 <svelte:window onkeydown={onKey} />
 
-<section>
+<section class:dropping>
   <header>
     <h2 class="num">{slot.fileName}</h2>
     <span class="muted num">
@@ -914,6 +987,28 @@
           </button>
         </div>
 
+        <h3>Add audio</h3>
+        <div class="row">
+          <button onclick={() => addFiles()} disabled={busy} title="Each file becomes a splice after the picked ones. You can also drop WAV files here.">
+            Insert files…
+          </button>
+          <button onclick={() => fileIntoSplice(false)} disabled={busy || selection.first !== selection.last}>
+            Replace with file…
+          </button>
+        </div>
+        <div class="row">
+          <label title="Like the module's S.O.S. control: 0% keeps only the file, 100% only what was there">
+            S.O.S.
+            <input type="number" min="0" max="100" step="5" bind:value={sos} /> %
+          </label>
+          <button onclick={() => fileIntoSplice(true)} disabled={busy || selection.first !== selection.last}>
+            Mix in file…
+          </button>
+        </div>
+        <div class="row">
+          <button onclick={exportPicked} disabled={busy}>Export as WAV files…</button>
+        </div>
+
         <h3>Auto-slice</h3>
         <select value={sliceMode} onchange={(e) => setSliceMode(e.currentTarget.value as SliceMode)}>
           <option value="phrases">Phrases: where the sound changes character</option>
@@ -1082,5 +1177,10 @@
     font-size: 11px;
     color: var(--danger);
     white-space: nowrap;
+  }
+  section.dropping {
+    outline: 2px dashed var(--accent);
+    outline-offset: 4px;
+    border-radius: 8px;
   }
 </style>

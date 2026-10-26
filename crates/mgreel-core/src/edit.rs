@@ -204,6 +204,54 @@ impl Session {
         Ok(self.replace(&bounds, at, at, clip.audio.clone(), clip.lengths.clone()))
     }
 
+    /// Insert each of `pieces` as a new splice before splice `at`.
+    pub fn insert(&mut self, markers: &[u32], at: usize, pieces: &[Stereo]) -> Result<Vec<u32>> {
+        let mut clip = Clipboard::default();
+        for p in pieces.iter().filter(|p| !p.is_empty()) {
+            clip.audio.extend(p);
+            clip.lengths.push(p.len());
+        }
+        self.paste(markers, at, &clip)
+    }
+
+    /// Put `audio` in place of splice `i`.
+    pub fn replace_splice(&mut self, markers: &[u32], i: usize, audio: Stereo) -> Result<Vec<u32>> {
+        let bounds = self.bounds(markers);
+        check_selection(&bounds, i, i)?;
+        if audio.is_empty() {
+            bail!("that file has no audio");
+        }
+        let len = audio.len();
+        Ok(self.replace(&bounds, i, i + 1, audio, vec![len]))
+    }
+
+    /// Mix `audio` into splice `i` from its start, like recording with
+    /// Sound On Sound. `sos` runs from 0 (only the new audio) to 1 (only
+    /// what was there). Past the end of `audio` the splice is unchanged,
+    /// and the splice keeps its length.
+    pub fn mix_splice(&mut self, markers: &[u32], i: usize, audio: &Stereo, sos: f32) -> Result<Vec<u32>> {
+        let bounds = self.bounds(markers);
+        check_selection(&bounds, i, i)?;
+        let sos = sos.clamp(0.0, 1.0);
+        let mut mixed = self.audio.slice(bounds[i]..bounds[i + 1]);
+        let len = mixed.len();
+        for (old, new) in [(&mut mixed.left, &audio.left), (&mut mixed.right, &audio.right)] {
+            for (o, n) in old.iter_mut().zip(new) {
+                *o = *o * sos + n * (1.0 - sos);
+            }
+        }
+        Ok(self.replace(&bounds, i, i + 1, mixed, vec![len]))
+    }
+
+    /// Splices `first..=last`, each on its own.
+    pub fn splices(&self, markers: &[u32], first: usize, last: usize) -> Result<Vec<Stereo>> {
+        let bounds = self.bounds(markers);
+        check_selection(&bounds, first, last)?;
+        Ok((first..=last)
+            .map(|i| self.audio.slice(bounds[i]..bounds[i + 1]))
+            .collect())
+    }
+
     /// Apply `op` to splices `first..=last`. Returns the new markers. An
     /// edit that changes nothing leaves the history alone.
     pub fn apply(&mut self, markers: &[u32], first: usize, last: usize, op: Op) -> Result<Vec<u32>> {
@@ -583,6 +631,29 @@ mod tests {
             layout(&s, &m2),
             vec![(1.0, 100), (2.0, 200), (3.0, 300), (1.0, 100)]
         );
+    }
+
+    #[test]
+    fn insert_replace_and_mix() {
+        let (mut s, m) = three();
+        let new = |v: f32, n: usize| Stereo::new(vec![v; n], vec![-v; n]);
+        let m2 = s.insert(&m, 1, &[new(7.0, 10), new(8.0, 20)]).unwrap();
+        assert_eq!(
+            layout(&s, &m2),
+            vec![(1.0, 100), (7.0, 10), (8.0, 20), (2.0, 200), (3.0, 300)]
+        );
+
+        let (mut s, m) = three();
+        let m2 = s.replace_splice(&m, 0, new(9.0, 50)).unwrap();
+        assert_eq!(layout(&s, &m2), vec![(9.0, 50), (2.0, 200), (3.0, 300)]);
+
+        // Half and half over the first 100 frames of the 200-frame splice.
+        let (mut s, m) = three();
+        let m2 = s.mix_splice(&m, 1, &new(4.0, 100), 0.5).unwrap();
+        assert_eq!(m2, m);
+        assert_eq!(s.audio().left[100], 3.0);
+        assert_eq!(s.audio().right[100], -3.0);
+        assert_eq!(s.audio().left[250], 2.0);
     }
 
     #[test]
