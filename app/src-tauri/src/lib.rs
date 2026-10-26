@@ -345,6 +345,104 @@ async fn paste_splices(
     })
 }
 
+fn open_clip(path: &str) -> CmdResult<Stereo> {
+    let clip = Clip::open(Path::new(path)).map_err(|e| {
+        let name = Path::new(path).file_name().map_or(path.into(), |n| n.to_string_lossy());
+        format!("{name}: {e:#}")
+    })?;
+    Ok(Stereo::new(clip.left, clip.right))
+}
+
+/// Insert WAV files as new splices before splice `at`, one splice each.
+/// Any sample rate, bit depth, mono or stereo.
+#[tauri::command]
+async fn insert_files(
+    editing: State<'_, Editing>,
+    root: String,
+    index: usize,
+    markers: Vec<u32>,
+    at: usize,
+    paths: Vec<String>,
+) -> CmdResult<Response> {
+    let pieces = paths.iter().map(|p| open_clip(p)).collect::<CmdResult<Vec<_>>>()?;
+    with_open(&editing, &root, index, |open| {
+        let s = &mut open.session;
+        let markers = s.insert(&markers, at, &pieces).map_err(err)?;
+        let spans: Vec<Span> = s.last_span().into_iter().collect();
+        Ok(edit_result(s.position(), s.oldest(), Some(&markers), &spans))
+    })
+}
+
+/// Replace splice `splice` with a WAV file, or with `sos` set, mix the file
+/// into it: 0 keeps only the file, 1 only what was there.
+#[tauri::command]
+async fn put_file(
+    editing: State<'_, Editing>,
+    root: String,
+    index: usize,
+    markers: Vec<u32>,
+    splice: usize,
+    path: String,
+    sos: Option<f32>,
+) -> CmdResult<Response> {
+    let audio = open_clip(&path)?;
+    with_open(&editing, &root, index, |open| {
+        let s = &mut open.session;
+        let before = s.position();
+        let markers = match sos {
+            Some(sos) => s.mix_splice(&markers, splice, &audio, sos),
+            None => s.replace_splice(&markers, splice, audio),
+        }
+        .map_err(err)?;
+        let spans: Vec<Span> = if s.position() != before {
+            s.last_span().into_iter().collect()
+        } else {
+            Vec::new()
+        };
+        Ok(edit_result(s.position(), s.oldest(), Some(&markers), &spans))
+    })
+}
+
+/// Write splices `first..=last` to `dir` as 48 kHz 32-bit float WAVs named
+/// after the reel and splice number, such as `mg3-07.wav`. Never
+/// overwrites: a name that exists gets -2, -3 and so on. Returns the paths.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn export_splices(
+    editing: State<'_, Editing>,
+    root: String,
+    index: usize,
+    markers: Vec<u32>,
+    first: usize,
+    last: usize,
+    dir: String,
+) -> CmdResult<Vec<String>> {
+    let pieces = with_open(&editing, &root, index, |open| {
+        open.session.splices(&markers, first, last).map_err(err)
+    })?;
+    let stem = card::slot_file_name(index).trim_end_matches(".wav").to_string();
+    let mut written = Vec::new();
+    for (k, piece) in pieces.into_iter().enumerate() {
+        let bytes = Reel {
+            left: piece.left,
+            right: piece.right,
+            markers: Vec::new(),
+        }
+        .to_wav_bytes()
+        .map_err(err)?;
+        let base = format!("{stem}-{:02}", first + k + 1);
+        let mut path = Path::new(&dir).join(format!("{base}.wav"));
+        let mut n = 2;
+        while path.exists() {
+            path = Path::new(&dir).join(format!("{base}-{n}.wav"));
+            n += 1;
+        }
+        std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        written.push(path.display().to_string());
+    }
+    Ok(written)
+}
+
 /// Undo or redo audio edits until the history is at `pos`.
 #[tauri::command]
 async fn seek_history(
@@ -734,6 +832,9 @@ pub fn run() {
             copy_splices,
             paste_splices,
             seek_history,
+            insert_files,
+            put_file,
+            export_splices,
             auto_slice,
             probe_sources,
             build_reel,
@@ -766,6 +867,9 @@ mod tests {
                 copy_splices,
                 paste_splices,
                 seek_history,
+            insert_files,
+            put_file,
+            export_splices,
                 save_reel,
             ])
             .build(mock_context(noop_assets()))
@@ -910,6 +1014,52 @@ mod tests {
         )
         .unwrap()));
         assert_eq!(markers, Some(vec![4800, 19200]));
+
+        // Insert a file as a new splice at the start, then undo it.
+        let extra = root.join("extra.wav");
+        let one = Reel {
+            left: vec![0.7; 480],
+            right: vec![0.7; 480],
+            markers: vec![],
+        };
+        std::fs::write(&extra, one.to_wav_bytes().unwrap()).unwrap();
+        let (pos, _, markers, _) = decode(&raw(call(
+            &w,
+            "insert_files",
+            args(serde_json::json!({ "markers": [4800, 19200], "at": 0, "paths": [extra.display().to_string()] })),
+        )
+        .unwrap()));
+        assert_eq!(markers, Some(vec![480, 5280, 19680]));
+        call(&w, "seek_history", args(serde_json::json!({ "pos": pos - 1 }))).unwrap();
+
+        // Mix it half and half into the first splice.
+        let (_, _, markers, spans) = decode(&raw(call(
+            &w,
+            "put_file",
+            args(serde_json::json!({ "markers": [4800, 19200], "splice": 0, "path": extra.display().to_string(), "sos": 0.5 })),
+        )
+        .unwrap()));
+        assert_eq!(markers, Some(vec![4800, 19200]));
+        assert!((spans[0].2[0] - (0.05 * 0.5 + 0.7 * 0.5)).abs() < 1e-4);
+        assert!((spans[0].2[480] - 0.05 * 0.5).abs() > 0.01, "past the file the splice is unchanged");
+
+        // Export the last two splices.
+        let out = root.join("export");
+        std::fs::create_dir_all(&out).unwrap();
+        let body = call(
+            &w,
+            "export_splices",
+            args(serde_json::json!({ "markers": [4800, 19200], "first": 1, "last": 2, "dir": out.display().to_string() })),
+        )
+        .unwrap();
+        let paths: Vec<String> = body.deserialize().unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(paths[0].ends_with("mg1-02.wav"), "{paths:?}");
+        assert_eq!(Reel::open(Path::new(&paths[1])).unwrap().frames(), 4800);
+        std::fs::remove_file(&extra).unwrap();
+        std::fs::remove_dir_all(&out).unwrap();
+        // Undo the mix so the save below sees the pasted reel.
+        call(&w, "seek_history", args(serde_json::json!({ "pos": 3 }))).unwrap();
 
         // Save writes the edited audio and markers.
         call(&w, "save_reel", args(serde_json::json!({ "markers": [4800, 19200] }))).unwrap();

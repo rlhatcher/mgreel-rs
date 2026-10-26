@@ -160,6 +160,25 @@ export const copySplices = (root: string, index: number, markers: number[], firs
   invoke<number>("copy_splices", { root, index, markers, first, last });
 export const pasteSplices = async (root: string, index: number, markers: number[], at: number) =>
   parseEdit(await invoke<ArrayBuffer>("paste_splices", { root, index, markers, at }));
+export const insertFiles = async (root: string, index: number, markers: number[], at: number, paths: string[]) =>
+  parseEdit(await invoke<ArrayBuffer>("insert_files", { root, index, markers, at, paths }));
+/** Replace splice `splice` with a file, or mix it in when `sos` is set (0 file only, 1 original only). */
+export const putFile = async (
+  root: string,
+  index: number,
+  markers: number[],
+  splice: number,
+  path: string,
+  sos: number | null,
+) => parseEdit(await invoke<ArrayBuffer>("put_file", { root, index, markers, splice, path, sos }));
+export const exportSplices = (
+  root: string,
+  index: number,
+  markers: number[],
+  first: number,
+  last: number,
+  dir: string,
+) => invoke<string[]>("export_splices", { root, index, markers, first, last, dir });
 export const seekHistory = async (root: string, index: number, pos: number) =>
   parseEdit(await invoke<ArrayBuffer>("seek_history", { root, index, pos }));
 export type SliceMode = "phrases" | "gestures";
