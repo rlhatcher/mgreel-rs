@@ -90,10 +90,12 @@
                 min="-16"
                 max="16"
                 title="0.0625 to 16; negative plays the gene in reverse"
-                bind:value={
-                  () => values[entry.key],
-                  (v) => (values[entry.key] = Number(v).toFixed(5))
-                }
+                bind:value={values[entry.key]}
+                onchange={(e) => {
+                  // Format once editing ends, so typing isn't rewritten.
+                  const v = e.currentTarget.value;
+                  if (v !== "" && Number.isFinite(Number(v))) values[entry.key] = Number(v).toFixed(5);
+                }}
               />
             {:else}
               <input class="num" bind:value={values[entry.key]} />

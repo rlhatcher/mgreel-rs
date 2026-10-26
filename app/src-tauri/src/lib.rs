@@ -330,7 +330,9 @@ async fn build_reel(
     let options = BuildOptions {
         // -1 dBFS leaves a little headroom under full scale.
         normalize: normalize.then_some(0.891),
-        fade_frames: fade_ms * reel::SAMPLE_RATE / 1000,
+        // The UI caps fades at 500 ms. Clamp here too so a larger value
+        // can't overflow the frame count.
+        fade_frames: fade_ms.min(500) * reel::SAMPLE_RATE / 1000,
     };
     let reel = Reel::build(clips, options);
     check_limits(reel.frames(), reel.markers.len())?;

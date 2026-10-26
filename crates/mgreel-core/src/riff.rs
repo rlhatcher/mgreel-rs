@@ -171,12 +171,23 @@ impl Format {
             3 => true,
             other => bail!("unsupported WAVE format tag {other:#06x}"),
         };
-        Ok(Format {
+        let format = Format {
             float,
             channels: le16(2),
             sample_rate: u32::from_le_bytes(fmt[4..8].try_into().unwrap()),
             bits_per_sample: le16(14),
-        })
+        };
+        // A zero here would make the frame size or the resample ratio zero.
+        if format.channels == 0 {
+            bail!("fmt chunk declares no channels");
+        }
+        if format.sample_rate == 0 {
+            bail!("fmt chunk declares a sample rate of 0");
+        }
+        if format.bits_per_sample < 8 || !format.bits_per_sample.is_multiple_of(8) {
+            bail!("unsupported bit depth {}", format.bits_per_sample);
+        }
+        Ok(format)
     }
 
     pub fn frame_bytes(&self) -> usize {
@@ -187,6 +198,26 @@ impl Format {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fmt_chunk(channels: u16, rate: u32, bits: u16) -> Vec<u8> {
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&1u16.to_le_bytes());
+        fmt.extend_from_slice(&channels.to_le_bytes());
+        fmt.extend_from_slice(&rate.to_le_bytes());
+        fmt.extend_from_slice(&0u32.to_le_bytes());
+        fmt.extend_from_slice(&0u16.to_le_bytes());
+        fmt.extend_from_slice(&bits.to_le_bytes());
+        fmt
+    }
+
+    #[test]
+    fn format_rejects_degenerate_headers() {
+        assert!(Format::parse(&fmt_chunk(2, 48_000, 16)).is_ok());
+        assert!(Format::parse(&fmt_chunk(0, 48_000, 16)).is_err());
+        assert!(Format::parse(&fmt_chunk(2, 0, 16)).is_err());
+        assert!(Format::parse(&fmt_chunk(2, 48_000, 4)).is_err());
+        assert!(Format::parse(&fmt_chunk(2, 48_000, 12)).is_err());
+    }
 
     #[test]
     fn cue_round_trip() {
