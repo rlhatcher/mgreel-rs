@@ -466,25 +466,32 @@ async fn export_splices(
     Ok(written)
 }
 
-/// Undo or redo audio edits until the history is at `pos`.
+/// Undo or redo audio edits until the history is at `pos`. With `state`,
+/// refuse unless `pos` still holds that audio: an edit after undo replaces
+/// the history past its position.
 #[tauri::command]
 async fn seek_history(
     editing: State<'_, Editing>,
     root: String,
     index: usize,
     pos: usize,
+    state: Option<u64>,
 ) -> CmdResult<Response> {
     with_open(&editing, &root, index, |open| {
         // Work out the status first: the spans borrow the session.
         let s = &open.session;
+        let found = s.state_at(pos).ok_or(if pos < s.oldest() {
+            "that edit is too old to undo: the history keeps about 380 MB"
+        } else {
+            "that step was replaced by later edits"
+        })?;
+        if state.is_some_and(|want| want != found) {
+            return Err("that step was replaced by later edits".into());
+        }
         let status = Status {
             pos,
             oldest: s.oldest(),
-            state: s.state_at(pos).ok_or(if pos < s.oldest() {
-                "that edit is too old to undo: the history keeps about 380 MB"
-            } else {
-                "nothing to redo"
-            })?,
+            state: found,
             saved_pos: s.saved_position(),
         };
         let spans = open.session.seek(pos).map_err(err)?;
@@ -1030,6 +1037,9 @@ mod tests {
         assert!(spans[0].2.iter().all(|&x| x == 0.2));
         let (pos, ..) = decode(&raw(call(&w, "seek_history", args(serde_json::json!({ "pos": 1 }))).unwrap()));
         assert_eq!(pos, 1);
+        // Asking for position 0 with the wrong state id is refused.
+        let stale = call(&w, "seek_history", args(serde_json::json!({ "pos": 0, "state": 99 }))).unwrap_err();
+        assert!(stale.to_string().contains("replaced"), "{stale}");
 
         // A gain change in dB arrives with camelCase fields.
         let (pos, _, _, spans) = decode(&raw(call(

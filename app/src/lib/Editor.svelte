@@ -151,13 +151,18 @@
 
   // Undo. Each step stores the markers, locks and audio history position
   // from before a change.
-  type Snapshot = { markers: number[]; locked: number[]; audio: number };
+  type Snapshot = { markers: number[]; locked: number[]; audio: number; state: number };
   let undoStack = $state<Snapshot[]>([]);
   let redoStack = $state<Snapshot[]>([]);
 
-  const snapshot = (): Snapshot => ({ markers: markers.slice(), locked: [...locked], audio: audioPos });
+  const snapshot = (): Snapshot => ({
+    markers: markers.slice(),
+    locked: [...locked],
+    audio: audioPos,
+    state: audioState,
+  });
   const same = (a: Snapshot, b: Snapshot) =>
-    a.audio === b.audio &&
+    a.state === b.state &&
     sameMarkers(a.markers, b.markers) &&
     a.locked.length === b.locked.length &&
     a.locked.every((m) => b.locked.includes(m));
@@ -173,11 +178,11 @@
   }
 
   async function restore(s: Snapshot) {
-    if (s.audio !== audioPos) {
+    if (s.state !== audioState) {
       if (s.audio < oldestPos) {
         throw new Error("Older audio edits were dropped to save memory, so they can't be undone.");
       }
-      applyAudio(await seekHistory(root, slot.index, s.audio));
+      applyAudio(await seekHistory(root, slot.index, s.audio, s.state));
     }
     markers = s.markers.slice();
     locked = new Set(s.locked);
@@ -201,7 +206,10 @@
         undoStack = undoStack.slice(0, -1);
         redoStack = [...redoStack, now];
       } catch (e) {
-        notify(errorText(e), true);
+        // A step that can't be restored never will be, so drop it rather
+        // than leave Undo stuck on it.
+        undoStack = undoStack.slice(0, -1);
+        notify(`Can't undo that step: ${errorText(e)}`, true);
       } finally {
         busy = false;
       }
@@ -219,7 +227,8 @@
       redoStack = redoStack.slice(0, -1);
       undoStack = [...undoStack, now];
     } catch (e) {
-      notify(errorText(e), true);
+      redoStack = redoStack.slice(0, -1);
+      notify(`Can't redo that step: ${errorText(e)}`, true);
     } finally {
       busy = false;
     }
@@ -280,6 +289,9 @@
         return;
       }
       const added = next.length - markers.length;
+      // A new audio edit replaces the history past this position, so undo
+      // steps that point there (left by Revert) can't be restored.
+      if (r.state !== audioState) undoStack = undoStack.filter((u) => u.audio <= before.audio);
       pushUndo(before);
       locked = shiftLocks(r, next, keepOrder);
       applyAudio(r);
@@ -586,6 +598,7 @@
         markers: saved,
         locked: [...locked].filter((m) => saved.includes(m)),
         audio: savedAt,
+        state: savedState,
       });
       pushUndo(before);
     } catch (e) {
@@ -602,12 +615,21 @@
   }
 
   async function runAutoSlice() {
+    if (busy || saving) return;
+    // Busy holds off audio edits and undo while slicing. Marker edits still
+    // work, so the result is dropped if anything changed in the meantime.
+    const started = snapshot();
     slicing = true;
+    busy = true;
     try {
       const max = Math.max(1, Math.min(MAX_MARKERS + 1, Math.floor(sliceMax)));
       const min = Math.max(0.05, sliceMin);
       const longest = sliceLongest ? Math.max(sliceLongest, 2 * min) : null;
-      const found = await autoSlice(root, slot.index, sliceMode, min, longest, max - 1, [...locked]);
+      const found = await autoSlice(root, slot.index, sliceMode, min, longest, max - 1, started.locked);
+      if (!same(started, snapshot())) {
+        notify("The markers changed while auto-slice ran, so its result was dropped. Run it again.", true);
+        return;
+      }
       record();
       markers = found;
       selectedMarker = null;
@@ -616,6 +638,7 @@
       notify(errorText(e), true);
     } finally {
       slicing = false;
+      busy = false;
     }
   }
 
