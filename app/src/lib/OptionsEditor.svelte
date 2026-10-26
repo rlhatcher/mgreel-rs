@@ -6,15 +6,17 @@
   let { root, notify }: Props = $props();
 
   let options = $state<Options | null>(null);
-  let values = $state<Record<string, string>>({});
+  // A ratio field holds a number while typing and null once cleared.
+  let values = $state<Record<string, string | number | null>>({});
+  const valueOf = (key: string) => String(values[key] ?? "");
   let raw = $state(false);
   let text = $state("");
   let saving = $state(false);
 
   const changes = $derived(
     (options?.entries ?? [])
-      .filter((e) => values[e.key] !== e.value)
-      .map((e) => ({ key: e.key, value: values[e.key] })),
+      .filter((e) => valueOf(e.key) !== e.value)
+      .map((e) => ({ key: e.key, value: valueOf(e.key) })),
   );
   const dirty = $derived(raw ? text !== options?.text : changes.length > 0);
 
@@ -71,7 +73,7 @@
     {:else}
       <div class="grid">
         {#each options.entries as entry (entry.key)}
-          <div class="row" class:changed={values[entry.key] !== entry.value}>
+          <div class="row" class:changed={valueOf(entry.key) !== entry.value}>
             <div>
               <div class="name">{entry.name ?? entry.key}</div>
               <div class="muted small"><span class="num">{entry.key}</span> · {entry.comment}</div>
