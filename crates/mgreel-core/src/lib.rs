@@ -6,6 +6,7 @@
 //! with splice markers stored as cue points.
 
 pub mod card;
+pub mod edit;
 pub mod options;
 pub mod reel;
 pub mod riff;

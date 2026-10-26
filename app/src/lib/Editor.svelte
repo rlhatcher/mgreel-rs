@@ -1,14 +1,23 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
+  import Thumb from "./Thumb.svelte";
   import Waveform from "./Waveform.svelte";
   import {
+    MAX_FRAMES,
     MAX_MARKERS,
     SAMPLE_RATE,
+    applySpans,
     autoSlice,
+    copySplices,
+    editReel,
     errorText,
     formatTime,
     loadReel,
-    saveMarkers,
+    pasteSplices,
+    saveReel,
+    seekHistory,
+    type EditOp,
+    type EditResult,
     type LoadedReel,
     type SliceMode,
     type Slot,
@@ -50,16 +59,69 @@
   let slicing = $state(false);
   let waveform = $state<Waveform | undefined>();
 
+  // Audio edits happen in the app's Rust side. These track its history.
+  let audioPos = $state(0);
+  let oldestPos = $state(0);
+  /** The history position whose audio is on the card. */
+  let savedPos = $state(0);
+  /** A command that changes audio is running. */
+  let busy = $state(false);
+  /** Splices picked in the list. Null means the one under the cursor. */
+  let picked = $state<{ first: number; last: number } | null>(null);
+  let anchor = 0;
+  let dragFrom: number | null = null;
+  let gainDb = $state(-3);
+  let normalizeDb = $state(-1);
+  let fadeMs = $state(10);
+  let loopMs = $state(20);
+  let highPassHz = $state(40);
+
   const frames = $derived(reel?.left.length ?? 0);
   const splices = $derived(
     [0, ...markers].map((start, i) => ({ start, end: markers[i] ?? frames })),
   );
   const current = $derived(spliceAt(cursor));
+  const selection = $derived(
+    picked && picked.last < splices.length ? picked : { first: current, last: current },
+  );
   const tooMany = $derived(markers.length > MAX_MARKERS);
+  const tooLong = $derived(frames > MAX_FRAMES);
+  const jumps = $derived(splices.map(loopJumps));
+  const sameMarkers = (a: number[], b: number[]) => a.length === b.length && a.every((m, i) => m === b[i]);
 
   $effect(() => {
-    dirty = markers.length !== saved.length || markers.some((m, i) => m !== saved[i]);
+    dirty = audioPos !== savedPos || !sameMarkers(markers, saved);
   });
+
+  $effect(() => {
+    // Moving the cursor outside the picked splices drops the pick.
+    const c = current;
+    untrack(() => {
+      if (picked && (c < picked.first || c > picked.last)) picked = null;
+    });
+  });
+
+  /** True if a splice jumps hard from its last sample back to its first. */
+  function loopJumps(s: { start: number; end: number }) {
+    if (!reel || s.end - s.start < 64) return false;
+    const { left, right } = reel;
+    const n = 16;
+    let local = 0;
+    for (const ch of [left, right]) {
+      for (let k = 1; k <= n; k++) {
+        local += Math.abs(ch[s.start + k] - ch[s.start + k - 1]);
+        local += Math.abs(ch[s.end - k] - ch[s.end - k - 1]);
+      }
+    }
+    local /= 4 * n;
+    const jump = Math.max(
+      Math.abs(left[s.end - 1] - left[s.start]),
+      Math.abs(right[s.end - 1] - right[s.start]),
+    );
+    // Noisy sound hides a jump, so compare it to the sample-to-sample
+    // movement around the loop point.
+    return jump > 0.02 && jump > 4 * local;
+  }
 
   function spliceAt(frame: number) {
     const i = splices.findIndex((s) => frame >= s.start && frame < s.end);
@@ -72,49 +134,200 @@
     return `${(i * step).toFixed(2)}–${((i + 1) * step).toFixed(2)} V`;
   }
 
-  // Undo. Each step stores the markers and locks from before a change.
-  type Snapshot = { markers: number[]; locked: number[] };
+  // Undo. Each step stores the markers, locks and audio history position
+  // from before a change.
+  type Snapshot = { markers: number[]; locked: number[]; audio: number };
   let undoStack = $state<Snapshot[]>([]);
   let redoStack = $state<Snapshot[]>([]);
 
-  const snapshot = (): Snapshot => ({ markers: markers.slice(), locked: [...locked] });
+  const snapshot = (): Snapshot => ({ markers: markers.slice(), locked: [...locked], audio: audioPos });
   const same = (a: Snapshot, b: Snapshot) =>
-    a.markers.length === b.markers.length &&
-    a.markers.every((m, i) => m === b.markers[i]) &&
+    a.audio === b.audio &&
+    sameMarkers(a.markers, b.markers) &&
     a.locked.length === b.locked.length &&
     a.locked.every((m) => b.locked.includes(m));
 
-  /** Call before every change to markers or locks. */
-  function record() {
-    undoStack = [...undoStack.slice(1 - HISTORY), snapshot()];
+  function pushUndo(s: Snapshot) {
+    undoStack = [...undoStack.slice(1 - HISTORY), s];
     redoStack = [];
   }
 
-  function restore(s: Snapshot) {
+  /** Call before every change to markers or locks. */
+  function record() {
+    pushUndo(snapshot());
+  }
+
+  async function restore(s: Snapshot) {
+    if (s.audio !== audioPos) {
+      if (s.audio < oldestPos) {
+        throw new Error("Older audio edits were dropped to save memory, so they can't be undone.");
+      }
+      applyAudio(await seekHistory(root, slot.index, s.audio));
+    }
     markers = s.markers.slice();
     locked = new Set(s.locked);
     selectedMarker = null;
+    picked = null;
   }
 
-  function undo() {
+  async function undo() {
+    if (busy || saving) return;
     const now = snapshot();
     while (undoStack.length) {
       const s = undoStack[undoStack.length - 1];
-      undoStack = undoStack.slice(0, -1);
       // A drag that ended where it started leaves a step with no change.
-      if (same(s, now)) continue;
-      redoStack = [...redoStack, now];
-      restore(s);
+      if (same(s, now)) {
+        undoStack = undoStack.slice(0, -1);
+        continue;
+      }
+      busy = true;
+      try {
+        await restore(s);
+        undoStack = undoStack.slice(0, -1);
+        redoStack = [...redoStack, now];
+      } catch (e) {
+        notify(errorText(e), true);
+      } finally {
+        busy = false;
+      }
       return;
     }
   }
 
-  function redo() {
+  async function redo() {
     const s = redoStack[redoStack.length - 1];
-    if (!s) return;
-    redoStack = redoStack.slice(0, -1);
-    undoStack = [...undoStack, snapshot()];
-    restore(s);
+    if (!s || busy || saving) return;
+    const now = snapshot();
+    busy = true;
+    try {
+      await restore(s);
+      redoStack = redoStack.slice(0, -1);
+      undoStack = [...undoStack, now];
+    } catch (e) {
+      notify(errorText(e), true);
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** Take in the audio side of an edit, undo or redo. */
+  function applyAudio(r: EditResult) {
+    audioPos = r.pos;
+    oldestPos = r.oldest;
+    if (!r.spans.length || !reel) return;
+    stop();
+    const { left, right } = applySpans(reel.left, reel.right, r.spans);
+    reel = { ...reel, left, right };
+    preview?.close();
+    preview = makePreview(reel);
+  }
+
+  /** Locks move with their audio: those after the edit shift, those inside go. */
+  function shiftLocks(r: EditResult, next: number[]) {
+    const s = r.spans[0];
+    if (!s) return locked;
+    const delta = s.left.length - s.removed;
+    const moved = [...locked].flatMap((m) =>
+      m <= s.start ? [m] : m >= s.start + s.removed ? [m + delta] : [],
+    );
+    return new Set(moved.filter((m) => next.includes(m)));
+  }
+
+  /** Run an edit on the selected splices. */
+  async function runEdit(op: EditOp) {
+    if (busy || saving || !reel) return;
+    const { first, last } = selection;
+    busy = true;
+    try {
+      const before = snapshot();
+      const r = await editReel(root, slot.index, markers, first, last, op);
+      const next = r.markers ?? markers;
+      if (r.pos === audioPos && sameMarkers(next, markers)) {
+        notify("That made no change.");
+        return;
+      }
+      pushUndo(before);
+      locked = shiftLocks(r, next);
+      applyAudio(r);
+      markers = next;
+      selectedMarker = null;
+      const n = last - first + 1;
+      if (op.kind === "moveTo") {
+        const at = op.to < first ? op.to : op.to - n;
+        picked = { first: at, last: at + n - 1 };
+      } else if (op.kind === "delete") {
+        picked = null;
+      } else if (op.kind === "duplicate") {
+        picked = { first: last + 1, last: last + n };
+      } else {
+        picked = { first, last };
+      }
+      const starts = [0, ...markers];
+      cursor = starts[Math.min(picked?.first ?? first, starts.length - 1)];
+    } catch (e) {
+      notify(errorText(e), true);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function copy() {
+    const { first, last } = selection;
+    try {
+      const n = await copySplices(root, slot.index, markers, first, last);
+      notify(`Copied ${n} splice${n === 1 ? "" : "s"}. Paste them into this reel or another one.`);
+      return true;
+    } catch (e) {
+      notify(errorText(e), true);
+      return false;
+    }
+  }
+
+  async function cut() {
+    if (await copy()) await runEdit({ kind: "delete" });
+  }
+
+  async function paste() {
+    if (busy || saving || !reel) return;
+    const at = selection.last + 1;
+    busy = true;
+    try {
+      const before = snapshot();
+      const r = await pasteSplices(root, slot.index, markers, at);
+      const next = r.markers ?? markers;
+      pushUndo(before);
+      locked = shiftLocks(r, next);
+      const added = next.length - markers.length;
+      applyAudio(r);
+      markers = next;
+      picked = { first: at, last: at + added - 1 };
+      cursor = [0, ...markers][at];
+    } catch (e) {
+      notify(errorText(e), true);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function pick(i: number, extend: boolean) {
+    if (extend) {
+      picked = { first: Math.min(anchor, i), last: Math.max(anchor, i) };
+      return;
+    }
+    anchor = i;
+    picked = { first: i, last: i };
+    selectSplice(i);
+  }
+
+  function dropOn(target: number) {
+    if (dragFrom === null) return;
+    const from = dragFrom;
+    dragFrom = null;
+    const sel = from >= selection.first && from <= selection.last ? selection : { first: from, last: from };
+    const to = target < sel.first ? target : target > sel.last ? target + 1 : null;
+    if (to === null) return;
+    picked = sel;
+    runEdit({ kind: "moveTo", to });
   }
 
   // Preview
@@ -144,18 +357,26 @@
       locked = new Set();
       undoStack = [];
       redoStack = [];
+      audioPos = 0;
+      oldestPos = 0;
+      savedPos = 0;
+      picked = null;
       cursor = 0;
       selectedMarker = null;
-      preview = new Preview(
-        loaded.left,
-        loaded.right,
-        () => splices,
-        () => selected,
-        () => stop(),
-      );
+      preview = makePreview(loaded);
     } catch (e) {
       loadError = errorText(e);
     }
+  }
+
+  function makePreview(r: LoadedReel) {
+    return new Preview(
+      r.left,
+      r.right,
+      () => splices,
+      () => selected,
+      () => stop(),
+    );
   }
 
   function play(from = cursor) {
@@ -267,11 +488,22 @@
     selectedMarker = null;
   }
 
-  function revert() {
-    record();
-    markers = saved.slice();
-    locked = new Set([...locked].filter((m) => markers.includes(m)));
-    selectedMarker = null;
+  async function revert() {
+    if (busy || saving) return;
+    const before = snapshot();
+    busy = true;
+    try {
+      await restore({
+        markers: saved,
+        locked: [...locked].filter((m) => saved.includes(m)),
+        audio: savedPos,
+      });
+      pushUndo(before);
+    } catch (e) {
+      notify(errorText(e), true);
+    } finally {
+      busy = false;
+    }
   }
 
   function setSliceMode(next: SliceMode) {
@@ -325,16 +557,15 @@
 
   async function save() {
     // One save at a time: two would write the same temp file on the card.
-    if (!reel || saving) return;
+    if (!reel || saving || busy) return;
     saving = true;
-    // Edits made while the save runs stay unsaved.
-    const loaded = reel;
     const sent = markers.slice();
+    const pos = audioPos;
     try {
-      const updated = await saveMarkers(root, slot.index, sent, loaded.audioId);
-      loaded.audioId = updated.audioId;
+      const updated = await saveReel(root, slot.index, sent);
       saved = sent;
-      onsaved(updated.slot);
+      savedPos = pos;
+      onsaved(updated);
       notify(`Saved ${sent.length + 1} splices to ${slot.fileName}`);
     } catch (e) {
       notify(errorText(e), true);
@@ -350,11 +581,26 @@
       const key = e.key.toLowerCase();
       if (key === "s") {
         e.preventDefault();
-        if (dirty && !tooMany) save();
+        if (dirty && !tooMany && !tooLong) save();
       } else if (key === "z") {
         e.preventDefault();
         if (e.shiftKey) redo();
         else undo();
+      } else if (key === "c") {
+        e.preventDefault();
+        copy();
+      } else if (key === "x") {
+        e.preventDefault();
+        cut();
+      } else if (key === "v") {
+        e.preventDefault();
+        paste();
+      } else if (key === "d") {
+        e.preventDefault();
+        runEdit({ kind: "duplicate" });
+      } else if (key === "a") {
+        e.preventDefault();
+        picked = { first: 0, last: splices.length - 1 };
       }
       return;
     }
@@ -382,7 +628,8 @@
         break;
       case "Backspace":
       case "Delete":
-        removeSelected();
+        if (e.shiftKey) runEdit({ kind: "delete" });
+        else removeSelected();
         break;
       case "ArrowLeft":
         e.preventDefault();
@@ -420,12 +667,13 @@
     <span class="muted num">
       {formatTime(frames)} · {markers.length + 1} splices
       {#if dirty}· <strong class="unsaved">unsaved</strong>{/if}
+      {#if busy}· working…{/if}
     </span>
     <div class="actions">
-      <button onclick={undo} disabled={!undoStack.length} title="Undo (Cmd-Z)">Undo</button>
-      <button onclick={redo} disabled={!redoStack.length} title="Redo (Cmd-Shift-Z)">Redo</button>
-      <button onclick={revert} disabled={!dirty || saving}>Revert</button>
-      <button class="primary" onclick={save} disabled={!dirty || saving || tooMany}>
+      <button onclick={undo} disabled={!undoStack.length || busy} title="Undo (Cmd-Z)">Undo</button>
+      <button onclick={redo} disabled={!redoStack.length || busy} title="Redo (Cmd-Shift-Z)">Redo</button>
+      <button onclick={revert} disabled={!dirty || saving || busy}>Revert</button>
+      <button class="primary" onclick={save} disabled={!dirty || saving || busy || tooMany || tooLong}>
         {saving ? "Saving…" : "Save to card"}
       </button>
     </div>
@@ -443,6 +691,12 @@
     {/if}
     {#if tooMany}
       <p class="error">{markers.length} markers; the Morphagene allows {MAX_MARKERS}. Remove some to save.</p>
+    {/if}
+    {#if tooLong}
+      <p class="error">
+        {formatTime(frames)} long; the Morphagene loads reels up to {formatTime(MAX_FRAMES)}. Delete some
+        audio to save.
+      </p>
     {/if}
 
     <div class="transport">
@@ -544,26 +798,122 @@
     <p class="hint muted">
       Space plays from the cursor. Double-click or press M to add a marker, drag one to move it,
       Delete removes it, K locks it. ← → step through splices, S shifts to the next splice, L
-      switches between looping splices and playing through. Cmd-Z undoes, Cmd-S saves.
+      switches between looping splices and playing through. In the list, click a splice to pick it,
+      Shift-click to pick a run, drag to move them. Cmd-C, Cmd-X, Cmd-V and Cmd-D copy, cut, paste
+      and duplicate splices; Shift-Delete deletes them. Cmd-Z undoes, Cmd-S saves.
     </p>
 
     <div class="lower">
       <div class="list">
         <table>
-          <thead><tr><th>#</th><th>Start</th><th>Length</th><th>Organize</th></tr></thead>
+          <thead>
+            <tr><th>#</th><th></th><th>Start</th><th>Length</th><th>Organize</th><th></th></tr>
+          </thead>
           <tbody>
             {#each splices as s, i}
-              <tr class:current={i === current} class:playing={i === playingSplice} onclick={() => selectSplice(i)}>
+              <tr
+                class:current={i === current}
+                class:picked={i >= selection.first && i <= selection.last}
+                class:playing={i === playingSplice}
+                draggable="true"
+                onclick={(e) => pick(i, e.shiftKey)}
+                ondragstart={(e) => {
+                  dragFrom = i;
+                  e.dataTransfer?.setData("text/plain", String(i + 1));
+                }}
+                ondragover={(e) => e.preventDefault()}
+                ondrop={(e) => {
+                  e.preventDefault();
+                  dropOn(i);
+                }}
+              >
                 <td class="num">{i + 1}</td>
+                <td><Thumb left={reel.left} right={reel.right} start={s.start} end={s.end} /></td>
                 <td class="num">{formatTime(s.start)}</td>
                 <td class="num">{((s.end - s.start) / SAMPLE_RATE).toFixed(2)} s</td>
                 <td class="num muted">{organizeRange(i)}</td>
+                <td>
+                  {#if jumps[i]}
+                    <span class="jump" title="Jumps from its end back to its start, so the loop may click. Smooth loop fixes it.">
+                      loop jump
+                    </span>
+                  {/if}
+                </td>
               </tr>
             {/each}
           </tbody>
         </table>
       </div>
       <div class="tools">
+        <h3>
+          Splice{selection.last > selection.first ? "s" : ""}
+          {selection.first + 1}{selection.last > selection.first ? `–${selection.last + 1}` : ""}
+        </h3>
+        <div class="row">
+          <button onclick={cut} disabled={busy}>Cut</button>
+          <button onclick={copy} disabled={busy}>Copy</button>
+          <button onclick={paste} disabled={busy} title="After the picked splices">Paste</button>
+          <button onclick={() => runEdit({ kind: "duplicate" })} disabled={busy}>Duplicate</button>
+          <button
+            class="danger"
+            onclick={() => runEdit({ kind: "delete" })}
+            disabled={busy || splices.length < 2}
+          >
+            Delete
+          </button>
+        </div>
+        <div class="row">
+          <button onclick={() => runEdit({ kind: "reverse" })} disabled={busy}>Reverse</button>
+          <button
+            onclick={() => runEdit({ kind: "shuffle", seed: Math.floor(Math.random() * 2 ** 32) })}
+            disabled={busy || selection.first === selection.last}
+            title="Put the picked splices in a random order"
+          >
+            Shuffle
+          </button>
+        </div>
+        <div class="row">
+          <input type="number" step="0.5" bind:value={gainDb} /> dB
+          <button onclick={() => runEdit({ kind: "gain", db: gainDb })} disabled={busy}>Gain</button>
+        </div>
+        <div class="row">
+          <input type="number" step="0.5" max="0" bind:value={normalizeDb} /> dBFS
+          <button onclick={() => runEdit({ kind: "normalize", db: normalizeDb })} disabled={busy}>
+            Normalize
+          </button>
+        </div>
+        <div class="row">
+          <button
+            onclick={() => runEdit({ kind: "matchLevels" })}
+            disabled={busy || selection.first === selection.last}
+            title="Bring each picked splice to their average loudness, so Organize doesn't jump in level"
+          >
+            Match levels
+          </button>
+        </div>
+        <div class="row">
+          <input type="number" min="1" step="1" bind:value={fadeMs} /> ms
+          <button onclick={() => runEdit({ kind: "fadeIn", ms: fadeMs })} disabled={busy}>Fade in</button>
+          <button onclick={() => runEdit({ kind: "fadeOut", ms: fadeMs })} disabled={busy}>Fade out</button>
+        </div>
+        <div class="row">
+          <input type="number" min="2" step="5" bind:value={loopMs} /> ms
+          <button
+            onclick={() => runEdit({ kind: "smoothLoop", ms: loopMs })}
+            disabled={busy}
+            title="Crossfade each splice's end into its start so it loops without a jump. Shortens it by this much."
+          >
+            Smooth loop
+          </button>
+        </div>
+        <div class="row">
+          <button onclick={() => runEdit({ kind: "removeDc" })} disabled={busy}>Remove DC</button>
+          <input type="number" min="5" max="2000" step="5" bind:value={highPassHz} /> Hz
+          <button onclick={() => runEdit({ kind: "highPass", hz: highPassHz })} disabled={busy}>
+            High-pass
+          </button>
+        </div>
+
         <h3>Auto-slice</h3>
         <select value={sliceMode} onchange={(e) => setSliceMode(e.currentTarget.value as SliceMode)}>
           <option value="phrases">Phrases: where the sound changes character</option>
@@ -673,9 +1023,6 @@
   td {
     padding: 4px 10px;
   }
-  tr.current td {
-    background: var(--select);
-  }
   tbody tr {
     cursor: pointer;
   }
@@ -718,5 +1065,22 @@
   }
   tr.playing td:first-child {
     box-shadow: inset 3px 0 0 var(--accent);
+  }
+  tr.picked td {
+    background: var(--select);
+  }
+  tr.current td:first-child {
+    font-weight: 700;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .jump {
+    font-size: 11px;
+    color: var(--danger);
+    white-space: nowrap;
   }
 </style>

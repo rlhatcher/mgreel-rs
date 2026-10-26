@@ -76,9 +76,92 @@ export async function loadReel(root: string, index: number): Promise<LoadedReel>
   };
 }
 
-/** `audioId` comes from `loadReel`. The save fails if the reel's audio differs. */
-export const saveMarkers = (root: string, index: number, markers: number[], audioId: string) =>
-  invoke<{ slot: Slot; audioId: string }>("save_markers", { root, index, markers, audioId });
+/** Write the open reel and its markers to the card. */
+export const saveReel = (root: string, index: number, markers: number[]) =>
+  invoke<Slot>("save_reel", { root, index, markers });
+
+/** What to do to the selected splices. */
+export type EditOp =
+  | { kind: "delete" }
+  | { kind: "duplicate" }
+  | { kind: "moveTo"; to: number }
+  | { kind: "shuffle"; seed: number }
+  | { kind: "reverse" }
+  | { kind: "gain"; db: number }
+  | { kind: "normalize"; db: number }
+  | { kind: "matchLevels" }
+  | { kind: "fadeIn"; ms: number }
+  | { kind: "fadeOut"; ms: number }
+  | { kind: "smoothLoop"; ms: number }
+  | { kind: "removeDc" }
+  | { kind: "highPass"; hz: number };
+
+/** At `start`, drop `removed` frames and put these samples in. */
+export type Span = { start: number; removed: number; left: Float32Array; right: Float32Array };
+
+export type EditResult = {
+  /** History position after the edit, and the oldest one undo can reach. */
+  pos: number;
+  oldest: number;
+  /** New markers, or null when the caller already knows them (undo, redo). */
+  markers: number[] | null;
+  spans: Span[];
+};
+
+export function parseEdit(buffer: ArrayBuffer): EditResult {
+  const view = new DataView(buffer);
+  let at = 0;
+  const u32 = () => {
+    const v = view.getUint32(at, true);
+    at += 4;
+    return v;
+  };
+  const pos = u32();
+  const oldest = u32();
+  const hasMarkers = u32() === 1;
+  const markers = Array.from({ length: u32() }, u32);
+  const heads = Array.from({ length: u32() }, () => ({ start: u32(), removed: u32(), inserted: u32() }));
+  const spans = heads.map((h) => {
+    // Copy out of the reply, so the spans don't keep the whole buffer alive.
+    const left = new Float32Array(buffer.slice(at, at + h.inserted * 4));
+    at += h.inserted * 4;
+    const right = new Float32Array(buffer.slice(at, at + h.inserted * 4));
+    at += h.inserted * 4;
+    return { start: h.start, removed: h.removed, left, right };
+  });
+  return { pos, oldest, markers: hasMarkers ? markers : null, spans };
+}
+
+/** Apply spans in order to copies of the channels. */
+export function applySpans(left: Float32Array, right: Float32Array, spans: Span[]) {
+  for (const s of spans) {
+    const join = (old: Float32Array, inserted: Float32Array) => {
+      const out = new Float32Array(old.length - s.removed + inserted.length);
+      out.set(old.subarray(0, s.start), 0);
+      out.set(inserted, s.start);
+      out.set(old.subarray(s.start + s.removed), s.start + inserted.length);
+      return out;
+    };
+    left = join(left, s.left);
+    right = join(right, s.right);
+  }
+  return { left, right };
+}
+
+export const editReel = async (
+  root: string,
+  index: number,
+  markers: number[],
+  first: number,
+  last: number,
+  op: EditOp,
+) => parseEdit(await invoke<ArrayBuffer>("edit_reel", { root, index, markers, first, last, op }));
+export const copySplices = (root: string, index: number, markers: number[], first: number, last: number) =>
+  invoke<number>("copy_splices", { root, index, markers, first, last });
+export const pasteSplices = async (root: string, index: number, markers: number[], at: number) =>
+  parseEdit(await invoke<ArrayBuffer>("paste_splices", { root, index, markers, at }));
+export const seekHistory = async (root: string, index: number, pos: number) =>
+  parseEdit(await invoke<ArrayBuffer>("seek_history", { root, index, pos }));
 export type SliceMode = "phrases" | "gestures";
 export const autoSlice = (
   root: string,
