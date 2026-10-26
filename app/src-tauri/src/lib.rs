@@ -136,14 +136,16 @@ async fn restore_card(app: AppHandle, root: String, from: String) -> CmdResult<(
 // Reel editor
 
 /// The reel as 48 kHz stereo floats, for drawing and playback.
-/// Layout, little-endian: u32 marker count, the markers as u32 frames, then
-/// every left sample followed by every right sample as f32.
+/// Layout, little-endian: u32 marker count, the u64 audio id, the markers as
+/// u32 frames, then every left sample followed by every right sample as f32.
 #[tauri::command]
 async fn load_reel(root: String, index: usize) -> CmdResult<Response> {
     check_slot(index)?;
-    let reel = Reel::open(&Card::new(root).slot_path(index)).map_err(err)?;
-    let mut out = Vec::with_capacity(4 + reel.markers.len() * 4 + reel.left.len() * 8);
+    let file = ReelFile::open(&Card::new(root).slot_path(index)).map_err(err)?;
+    let reel = Reel::from_file(&file).map_err(err)?;
+    let mut out = Vec::with_capacity(12 + reel.markers.len() * 4 + reel.left.len() * 8);
     out.extend_from_slice(&(reel.markers.len() as u32).to_le_bytes());
+    out.extend_from_slice(&file.audio_id().to_le_bytes());
     for m in &reel.markers {
         out.extend_from_slice(&m.to_le_bytes());
     }
@@ -161,11 +163,22 @@ async fn save_markers(
     root: String,
     index: usize,
     markers: Vec<u32>,
-) -> CmdResult<SlotDto> {
+    audio_id: String,
+) -> CmdResult<Saved> {
     check_slot(index)?;
     let card = Card::new(root);
     let path = card.slot_path(index);
     let mut file = ReelFile::open(&path).map_err(err)?;
+    // A different card with the same name mounts at the same path, and
+    // the reel can change on the card while it is open here. Either way,
+    // these markers belong to other audio.
+    if file.audio_id().to_string() != audio_id {
+        return Err(format!(
+            "{} has changed since it was opened, so the markers were not saved. \
+             Is this the same card?",
+            card::slot_file_name(index)
+        ));
+    }
     let format = file.format().map_err(err)?;
     let bytes = if reel::is_morphagene_format(&format) {
         let frames = file.frames().map_err(err)?;
@@ -174,14 +187,26 @@ async fn save_markers(
         file.set_markers(&markers);
         file.to_bytes()
     } else {
-        let mut reel = Reel::open(&path).map_err(err)?;
+        let mut reel = Reel::from_file(&file).map_err(err)?;
         reel.markers = reel::clean_markers(markers, reel.frames());
         check_limits(reel.frames(), reel.markers.len())?;
         reel.to_wav_bytes().map_err(err)?
     };
     card.write_slot(index, &bytes, &backup_dir(&app, &card)?)
         .map_err(err)?;
-    Ok(card.slots().swap_remove(index).into())
+    // Converting the format changes the audio, so the editor needs the new id.
+    let audio_id = ReelFile::parse(&bytes).map_err(err)?.audio_id().to_string();
+    Ok(Saved {
+        slot: card.slots().swap_remove(index).into(),
+        audio_id,
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Saved {
+    slot: SlotDto,
+    audio_id: String,
 }
 
 #[derive(Deserialize)]
