@@ -29,13 +29,18 @@ pub struct SetInfo {
     pub modified: SystemTime,
 }
 
-/// Every set under `root`, by name.
-pub fn list(root: &Path) -> Vec<SetInfo> {
-    let Ok(entries) = fs::read_dir(root) else {
-        return Vec::new();
+/// Every set under `root`, by name. No folder yet means no sets.
+pub fn list(root: &Path) -> Result<Vec<SetInfo>> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", root.display())),
     };
+    let entries = entries
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("reading {}", root.display()))?;
     let mut sets: Vec<SetInfo> = entries
-        .flatten()
+        .into_iter()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             let dir = e.path();
@@ -66,7 +71,7 @@ pub fn list(root: &Path) -> Vec<SetInfo> {
         })
         .collect();
     sets.sort_by(|a, b| finder_order(&a.name, &b.name));
-    sets
+    Ok(sets)
 }
 
 /// Save the card as a set named `name` under `root`, and return its folder.

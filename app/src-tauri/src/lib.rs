@@ -190,6 +190,7 @@ struct SetDto {
 #[tauri::command]
 async fn list_sets(sets: State<'_, SetsRoot>) -> CmdResult<Vec<SetDto>> {
     Ok(sets::list(&sets.0)
+        .map_err(err)?
         .into_iter()
         .map(|s| SetDto {
             name: s.name,
@@ -1403,6 +1404,12 @@ mod tests {
         (app, w)
     }
 
+    /// Remove the backups a test made of the card at `root`. The mock app
+    /// has no identifier, so they'd stay in the user's Application Support.
+    fn remove_backups(app: &tauri::App<MockRuntime>, root: &Path) {
+        let _ = std::fs::remove_dir_all(backup_dir(app.handle(), &Card::new(root)).unwrap());
+    }
+
     fn call(
         w: &WebviewWindow<MockRuntime>,
         cmd: &str,
@@ -1487,7 +1494,7 @@ mod tests {
         std::fs::write(root.join("mg1.wav"), reel(0.1)).unwrap();
         std::fs::write(root.join("field/rain.wav"), reel(0.2)).unwrap();
         std::fs::write(root.join("._mg1.wav"), b"junk").unwrap();
-        let (_app, w) = window();
+        let (app, w) = window();
 
         let check = json(call(&w, "check_card", serde_json::json!({ "root": root_s })).unwrap());
         assert_eq!(check["clutter"], 1);
@@ -1523,6 +1530,7 @@ mod tests {
             serde_json::json!({ "root": root_s, "dir": root_s, "file": "mg1.wav" }),
         );
         assert!(refused.is_err(), "the card isn't a backup folder");
+        remove_backups(&app, &root);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1541,7 +1549,7 @@ mod tests {
         .unwrap();
         std::fs::write(root.join("mg1.wav"), &reel).unwrap();
         std::fs::write(root.join("mg2.wav"), &reel).unwrap();
-        let (_app, w) = window();
+        let (app, w) = window();
         let slots = |w: &WebviewWindow<MockRuntime>| {
             json(call(w, "list_slots", serde_json::json!({ "root": root_s })).unwrap())
         };
@@ -1580,6 +1588,7 @@ mod tests {
         let check = json(call(&w, "check_card", serde_json::json!({ "root": root_s })).unwrap());
         assert!(check["namesError"].is_null());
         assert!(!root.join("mgreel.json").exists());
+        remove_backups(&app, &root);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1602,7 +1611,7 @@ mod tests {
         .unwrap();
         std::fs::write(root.join("mg1.wav"), &reel).unwrap();
         std::fs::write(pack.join("Gulls.wav"), &reel).unwrap();
-        let (_app, w) = window();
+        let (app, w) = window();
         call(
             &w,
             "set_reel_name",
@@ -1646,6 +1655,7 @@ mod tests {
         .unwrap();
         let slots = json(call(&w, "list_slots", serde_json::json!({ "root": root_s })).unwrap());
         assert_eq!(slots[0]["name"], "Gulls");
+        remove_backups(&app, &root);
         for dir in [&root, &pack, &test_sets_root()] {
             let _ = std::fs::remove_dir_all(dir);
         }

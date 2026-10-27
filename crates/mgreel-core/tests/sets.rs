@@ -76,7 +76,7 @@ fn save_a_card_and_list_it() {
         entries(&dir),
         vec!["mg1.wav", "mga.wav", "mgreel.json", "options.txt"]
     );
-    let listed = sets::list(&sets_root);
+    let listed = sets::list(&sets_root).unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, "Drones");
     assert_eq!(listed[0].reels, vec![0, 9]);
@@ -87,6 +87,15 @@ fn save_a_card_and_list_it() {
     assert!(sets::save(&card, &sets_root, "Drones").is_err());
     assert!(sets::save(&card, &sets_root, "a/b").is_err());
     assert_eq!(entries(&sets_root), vec!["Drones"]);
+}
+
+#[test]
+fn listing_needs_no_sets_folder_but_reports_one_it_cant_read() {
+    let root = tempdir();
+    assert!(sets::list(&root.join("not made yet")).unwrap().is_empty());
+    // A file where the folder should be can't be read as one.
+    fs::write(root.join("a file"), b"").unwrap();
+    assert!(sets::list(&root.join("a file")).is_err());
 }
 
 #[test]
