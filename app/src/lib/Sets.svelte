@@ -23,6 +23,8 @@
   let { root, onchanged, notify }: Props = $props();
 
   let sets = $state<CardSet[] | null>(null);
+  /** Why the sets folder couldn't be read, if it couldn't. */
+  let listError = $state<string | null>(null);
   let busy = $state(false);
   let saveName = $state("");
   /** What the last import did, until it's closed. */
@@ -33,8 +35,9 @@
   async function refresh() {
     try {
       sets = await listSets();
+      listError = null;
     } catch (e) {
-      notify(errorText(e), true);
+      listError = errorText(e);
     }
   }
 
@@ -163,7 +166,9 @@
     </div>
   {/if}
 
-  {#if sets === null}
+  {#if listError}
+    <p class="error">The sets folder can't be read: {listError}</p>
+  {:else if sets === null}
     <p class="muted">Loading sets…</p>
   {:else if sets.length === 0}
     <p class="muted">No sets yet. Save a card as a set, or import a folder of WAV files.</p>
