@@ -59,9 +59,16 @@
   const spots = $derived(reelSpots(slots));
 
   // Look the card over whenever it or its slots change.
+  /** The card the shown check belongs to. */
+  let checkedRoot: string | null = null;
   $effect(() => {
     const r = root;
     void slots;
+    // Another card's result, and its fix buttons, must not show for this one.
+    if (r !== checkedRoot) {
+      check = null;
+      checkedRoot = r;
+    }
     recheck(r);
   });
 
