@@ -180,15 +180,18 @@
     const name = fields[0].value.trim();
     const note = fields[1].value.trim();
     const index = slot.index;
+    // The card can change before a queued save runs; the save stays with
+    // the card it was typed on.
+    const card = root;
     labelSaves = labelSaves.then(async () => {
-      // The slots as the last save left them.
-      const now = slots[index];
-      if (name === now.name && note === now.note) return;
+      // The slots as the last save left them, while still on that card.
+      const now = card === root ? slots[index] : null;
+      if (now && name === now.name && note === now.note) return;
       try {
-        await setReelName(root, index, name, note);
-        await onchanged();
+        await setReelName(card, index, name, note);
+        if (card === root) await onchanged();
       } catch (e) {
-        input.value = slots[index][field];
+        if (card === root) input.value = slots[index][field];
         notify(errorText(e), true);
       }
     });
@@ -266,6 +269,7 @@
   async function eject() {
     busy = true;
     try {
+      await labelSaves;
       await ejectCard(root);
       onejected();
     } catch (e) {
@@ -314,6 +318,7 @@
   async function backup() {
     busy = true;
     try {
+      await labelSaves;
       const dir = await backupCard(root);
       notify(`Backed up to ${dir}`);
     } catch (e) {
