@@ -1,5 +1,6 @@
 use mgreel_core::card::{slot_file_name, Card, CardIssue};
 use mgreel_core::history::{self, BackupKind};
+use mgreel_core::names::{ReelLabel, NAMES_FILE};
 use mgreel_core::{BuildOptions, Clip, OptionsFile, Reel};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -304,6 +305,93 @@ fn restores_one_file_from_a_backup() {
     assert!(card
         .restore_file(&root.join("notes.txt"), &backups)
         .is_err());
+}
+
+fn named(name: &str) -> ReelLabel {
+    ReelLabel {
+        name: name.into(),
+        note: String::new(),
+    }
+}
+
+fn name_of(card: &Card, index: usize) -> String {
+    card.names().unwrap().get(index).name.clone()
+}
+
+#[test]
+fn names_follow_reels_the_app_moves() {
+    let root = tempdir();
+    let backups = tempdir();
+    let card = make_card(&root, &[(0, 10), (1, 20), (2, 30)]);
+    assert!(card.names().unwrap().is_empty());
+    card.set_name(0, named("Harbour")).unwrap();
+    card.set_name(2, named("Gulls")).unwrap();
+
+    card.swap(0, 1).unwrap();
+    assert_eq!(name_of(&card, 1), "Harbour");
+    assert_eq!(name_of(&card, 0), "");
+    // mg3 (Gulls) goes first; the others shift along.
+    card.move_slot(2, 0).unwrap();
+    assert_eq!(frames_by_slot(&card)[0], (0, 60));
+    assert_eq!(name_of(&card, 0), "Gulls");
+    assert_eq!(name_of(&card, 2), "Harbour");
+
+    card.clear_slot(0, &backups).unwrap();
+    assert_eq!(name_of(&card, 0), "");
+    card.clear_slot(2, &backups).unwrap();
+    // No names left, so the file goes too.
+    assert!(!root.join(NAMES_FILE).exists());
+}
+
+#[test]
+fn a_new_reel_in_an_empty_slot_starts_unnamed() {
+    let root = tempdir();
+    let backups = tempdir();
+    let card = make_card(&root, &[(0, 10)]);
+    card.set_name(0, named("Kept")).unwrap();
+    // A name left behind by a reel deleted outside the app.
+    card.set_name(4, named("Stale")).unwrap();
+    card.write_slot(4, &reel_bytes(5), &backups).unwrap();
+    assert_eq!(name_of(&card, 4), "");
+    // Saving over a reel keeps its name.
+    card.write_slot(0, &reel_bytes(7), &backups).unwrap();
+    assert_eq!(name_of(&card, 0), "Kept");
+}
+
+#[test]
+fn unreadable_names_stop_moves() {
+    let root = tempdir();
+    let backups = tempdir();
+    let card = make_card(&root, &[(0, 10), (1, 20)]);
+    fs::write(root.join(NAMES_FILE), "{ not json").unwrap();
+    assert!(card.swap(0, 1).is_err());
+    assert!(card.clear_slot(0, &backups).is_err());
+    assert!(card.set_name(0, named("x")).is_err());
+    // Nothing moved, and the broken file is still there to fix.
+    assert_eq!(frames_by_slot(&card), vec![(0, 20), (1, 40)]);
+    assert_eq!(
+        fs::read_to_string(root.join(NAMES_FILE)).unwrap(),
+        "{ not json"
+    );
+}
+
+#[test]
+fn backups_keep_names() {
+    let root = tempdir();
+    let backups = tempdir();
+    let card = make_card(&root, &[(0, 10)]);
+    card.set_name(0, named("Harbour")).unwrap();
+    let saved = card.backup(&backups).unwrap();
+    assert!(saved.join(NAMES_FILE).is_file());
+
+    card.set_name(0, named("Changed")).unwrap();
+    card.restore(&saved, &backups).unwrap();
+    assert_eq!(name_of(&card, 0), "Harbour");
+
+    // A backup made before names existed leaves the reels unnamed.
+    fs::remove_file(saved.join(NAMES_FILE)).unwrap();
+    card.restore(&saved, &backups).unwrap();
+    assert!(!root.join(NAMES_FILE).exists());
 }
 
 fn walk(dir: &Path) -> Vec<PathBuf> {

@@ -1,5 +1,6 @@
 //! The Morphagene microSD card: 32 reel slots and `options.txt` at the root.
 
+use crate::names::{Names, ReelLabel, NAMES_FILE};
 use crate::reel::{self, Problem, Reel};
 use crate::riff::{self, Format};
 use anyhow::{bail, Context, Result};
@@ -109,6 +110,69 @@ impl Card {
         self.root.join(OPTIONS_FILE)
     }
 
+    pub fn names_path(&self) -> PathBuf {
+        self.root.join(NAMES_FILE)
+    }
+
+    /// The reel names on the card. A card without `mgreel.json` has none.
+    /// Fails when the file can't be read, and every change that moves or
+    /// removes a reel fails with it, so names never end up on the wrong reel.
+    pub fn names(&self) -> Result<Names> {
+        let path = self.names_path();
+        match fs::read_to_string(&path) {
+            Ok(text) => Names::parse(&text).with_context(|| format!("in {}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Names::default()),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    /// Name a reel and add a note to it. Empty strings clear them.
+    pub fn set_name(&self, index: usize, label: ReelLabel) -> Result<()> {
+        let mut names = self.names()?;
+        names.set(index, label);
+        self.write_names(&names)
+    }
+
+    /// Back up `mgreel.json`, then remove it, so a file that can't be read
+    /// stops blocking changes to the card.
+    pub fn remove_names(&self, backup_dir: &Path) -> Result<()> {
+        let path = self.names_path();
+        if path.exists() {
+            backup_file(&path, backup_dir)?;
+            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Write `mgreel.json`, or remove it when no reel has a name.
+    fn write_names(&self, names: &Names) -> Result<()> {
+        let path = self.names_path();
+        if names.is_empty() {
+            match fs::remove_file(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    Err(e).with_context(|| format!("removing {}", path.display()))
+                }
+                _ => Ok(()),
+            }
+        } else {
+            write_atomic(&path, names.to_json().as_bytes())
+        }
+    }
+
+    /// Before a reel goes into an empty slot, drop any name left there by a
+    /// reel deleted outside the app, so the new reel doesn't take it.
+    fn forget_if_empty(&self, index: usize) -> Result<()> {
+        if self.slot_path(index).exists() {
+            return Ok(());
+        }
+        let mut names = self.names()?;
+        if names.get(index).is_empty() {
+            return Ok(());
+        }
+        names.clear(index);
+        self.write_names(&names)
+    }
+
     /// Reel files at the root by slot. Skips macOS `._` metadata files.
     pub(crate) fn reel_files(&self) -> Vec<(usize, PathBuf)> {
         let Ok(entries) = fs::read_dir(&self.root) else {
@@ -171,6 +235,7 @@ impl Card {
     /// first, and the new one is written beside it then renamed into place,
     /// so a failed write never leaves a partial reel in the slot.
     pub fn write_slot(&self, index: usize, bytes: &[u8], backup_dir: &Path) -> Result<()> {
+        self.forget_if_empty(index)?;
         write_safely(&self.slot_path(index), bytes, backup_dir)
     }
 
@@ -179,12 +244,17 @@ impl Card {
         write_safely(&self.options_path(), text.as_bytes(), backup_dir)
     }
 
-    /// Back up then delete a slot's reel.
+    /// Back up then delete a slot's reel, and its name.
     pub fn clear_slot(&self, index: usize, backup_dir: &Path) -> Result<()> {
+        let mut names = self.names()?;
         let target = self.slot_path(index);
         if target.exists() {
             backup_file(&target, backup_dir)?;
             fs::remove_file(&target)?;
+        }
+        if !names.get(index).is_empty() {
+            names.clear(index);
+            self.write_names(&names)?;
         }
         Ok(())
     }
@@ -204,9 +274,9 @@ impl Card {
         self.reorder(&order)
     }
 
-    /// Rearrange reels so slot `i` gets what was in slot `order[i]`. All
-    /// moving files go to temporary names first so no rename overwrites a
-    /// reel that hasn't moved yet.
+    /// Rearrange reels so slot `i` gets what was in slot `order[i]`, names
+    /// included. All moving files go to temporary names first so no rename
+    /// overwrites a reel that hasn't moved yet.
     pub fn reorder(&self, order: &[usize]) -> Result<()> {
         let mut seen = [false; SLOT_COUNT];
         if order.len() != SLOT_COUNT
@@ -216,6 +286,8 @@ impl Card {
         {
             bail!("slot order must list each of the {SLOT_COUNT} slots once");
         }
+        // Read first, so a names file that can't be read stops the move.
+        let names = self.names()?;
         let current: Vec<Option<PathBuf>> = {
             let mut v = vec![None; SLOT_COUNT];
             for (i, p) in self.reel_files() {
@@ -236,6 +308,10 @@ impl Card {
         }
         for (tmp, dest) in staged {
             fs::rename(&tmp, self.root.join(slot_file_name(dest)))?;
+        }
+        let moved = names.reorder(order);
+        if moved != names {
+            self.write_names(&moved)?;
         }
         Ok(())
     }
@@ -347,31 +423,40 @@ impl Card {
             .into_owned();
         let target = if name.eq_ignore_ascii_case(OPTIONS_FILE) {
             self.options_path()
+        } else if name.eq_ignore_ascii_case(NAMES_FILE) {
+            self.names_path()
         } else {
-            self.slot_path(
-                slot_index(&name).with_context(|| format!("{name} isn't a reel or options.txt"))?,
-            )
+            let index = slot_index(&name)
+                .with_context(|| format!("{name} isn't a reel, options.txt or {NAMES_FILE}"))?;
+            self.forget_if_empty(index)?;
+            self.slot_path(index)
         };
         let bytes = fs::read(from).with_context(|| format!("reading {}", from.display()))?;
         write_safely(&target, &bytes, backup_dir)?;
         Ok(bytes)
     }
 
-    /// Copy every reel and `options.txt` into a new timestamped folder under
-    /// `dest`, and return that folder.
+    /// Copy every reel, `options.txt` and the reel names into a new
+    /// timestamped folder under `dest`, and return that folder.
     pub fn backup(&self, dest: &Path) -> Result<PathBuf> {
         let dir = new_dir(&dest.join(format!("{}-{}", self.label(), timestamp())))?;
         for (_, path) in self.reel_files() {
             fs::copy(&path, dir.join(path.file_name().unwrap()))?;
         }
-        if self.options_path().is_file() {
-            fs::copy(self.options_path(), dir.join(OPTIONS_FILE))?;
+        for (path, name) in [
+            (self.options_path(), OPTIONS_FILE),
+            (self.names_path(), NAMES_FILE),
+        ] {
+            if path.is_file() {
+                fs::copy(&path, dir.join(name))?;
+            }
         }
         Ok(dir)
     }
 
-    /// Replace the card's reels and `options.txt` with those in a backup
-    /// folder. Reels on the card are backed up to `backup_dir` first.
+    /// Replace the card's reels, `options.txt` and reel names with those in
+    /// a backup folder. A backup without names leaves the reels unnamed.
+    /// Reels on the card are backed up to `backup_dir` first.
     pub fn restore(&self, from: &Path, backup_dir: &Path) -> Result<()> {
         if !Card::looks_like_card(from) {
             bail!("{} holds no reels or options.txt", from.display());
@@ -385,6 +470,13 @@ impl Card {
         }
         if from.join(OPTIONS_FILE).is_file() {
             fs::copy(from.join(OPTIONS_FILE), self.options_path())?;
+        }
+        match fs::copy(from.join(NAMES_FILE), self.names_path()) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.write_names(&Names::default())?
+            }
+            Err(e) => return Err(e).context("restoring the reel names"),
         }
         Ok(())
     }
@@ -411,6 +503,11 @@ fn write_safely(target: &Path, bytes: &[u8], backup_dir: &Path) -> Result<()> {
     if target.exists() {
         backup_file(target, backup_dir)?;
     }
+    write_atomic(target, bytes)
+}
+
+/// Write `bytes` to a temporary file beside `target`, then rename it over.
+fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
     let dir = target.parent().context("target has no parent folder")?;
     let tmp = dir.join(format!(
         "{TEMP_PREFIX}{}",

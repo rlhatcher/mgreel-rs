@@ -4,6 +4,7 @@
 use mgreel_core::card::{self, Card, CardIssue, SlotInfo};
 use mgreel_core::edit::{Clipboard, Op, Session, Span, Stereo};
 use mgreel_core::history::{self, BackupKind};
+use mgreel_core::names::ReelLabel;
 use mgreel_core::options::{self, Kind, OptionsFile};
 use mgreel_core::reel::{self, Problem};
 use mgreel_core::riff::{self, Format};
@@ -45,11 +46,15 @@ struct SlotDto {
     /// Readable but not in Morphagene format, so Convert can fix it.
     convertible: bool,
     problems: Vec<String>,
+    name: String,
+    note: String,
 }
 
-impl From<SlotInfo> for SlotDto {
-    fn from(s: SlotInfo) -> Self {
+impl SlotDto {
+    fn new(s: SlotInfo, label: &ReelLabel) -> Self {
         SlotDto {
+            name: label.name.clone(),
+            note: label.note.clone(),
             index: s.index,
             file_name: s.file_name.clone(),
             present: s.path.is_some(),
@@ -92,11 +97,30 @@ async fn list_cards(app: AppHandle) -> Vec<CardDto> {
 
 #[tauri::command]
 async fn list_slots(root: String) -> Vec<SlotDto> {
-    Card::new(root)
-        .slots()
+    let card = Card::new(root);
+    // The card check reports a names file that can't be read.
+    let names = card.names().unwrap_or_default();
+    card.slots()
         .into_iter()
-        .map(SlotDto::from)
+        .map(|s| {
+            let label = names.get(s.index);
+            SlotDto::new(s, label)
+        })
         .collect()
+}
+
+#[tauri::command]
+async fn set_reel_name(root: String, index: usize, name: String, note: String) -> CmdResult<()> {
+    check_slot(index)?;
+    Card::new(root)
+        .set_name(index, ReelLabel { name, note })
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn remove_names<R: Runtime>(app: AppHandle<R>, root: String) -> CmdResult<()> {
+    let card = Card::new(root);
+    card.remove_names(&backup_dir(&app, &card)?).map_err(err)
 }
 
 #[tauri::command]
@@ -243,6 +267,8 @@ struct CardCheckDto {
     wrong_filesystem: Option<String>,
     stray: Vec<StrayDto>,
     clutter: usize,
+    /// Why `mgreel.json` can't be read, when it can't.
+    names_error: Option<String>,
 }
 
 /// The volume's file system as `diskutil` names it, such as "MS-DOS
@@ -285,6 +311,7 @@ async fn check_card(root: String) -> CmdResult<CardCheckDto> {
         wrong_filesystem: filesystem(&card.root).filter(|fs| !fs.contains("FAT32")),
         stray,
         clutter,
+        names_error: card.names().err().map(err),
     })
 }
 
@@ -835,7 +862,11 @@ async fn save_reel<R: Runtime>(
         remember(&app, &card, &bytes);
         open.disk_id = file_id(&bytes);
         open.session.mark_saved();
-        Ok(card.slots().swap_remove(index).into())
+        let names = card.names().unwrap_or_default();
+        Ok(SlotDto::new(
+            card.slots().swap_remove(index),
+            names.get(index),
+        ))
     })
 }
 
@@ -1166,6 +1197,8 @@ pub fn run() {
             restore_card,
             check_card,
             remove_clutter,
+            set_reel_name,
+            remove_names,
             convert_slot,
             adopt_file,
             list_backups,
@@ -1222,6 +1255,10 @@ mod tests {
                 adopt_file,
                 list_backups,
                 restore_file,
+                list_slots,
+                swap_slots,
+                set_reel_name,
+                remove_names,
             ])
             .build(mock_context(noop_assets()))
             .unwrap();
@@ -1351,6 +1388,63 @@ mod tests {
             serde_json::json!({ "root": root_s, "dir": root_s, "file": "mg1.wav" }),
         );
         assert!(refused.is_err(), "the card isn't a backup folder");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reel_names_through_ipc() {
+        let root = std::env::temp_dir().join(format!("mgreel-ipc-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root_s = root.display().to_string();
+        let reel = Reel {
+            left: vec![0.1; 4800],
+            right: vec![0.1; 4800],
+            markers: vec![],
+        }
+        .to_wav_bytes()
+        .unwrap();
+        std::fs::write(root.join("mg1.wav"), &reel).unwrap();
+        std::fs::write(root.join("mg2.wav"), &reel).unwrap();
+        let (_app, w) = window();
+        let slots = |w: &WebviewWindow<MockRuntime>| {
+            json(call(w, "list_slots", serde_json::json!({ "root": root_s })).unwrap())
+        };
+
+        call(
+            &w,
+            "set_reel_name",
+            serde_json::json!({ "root": root_s, "index": 0, "name": " Harbour ", "note": "gulls at dawn" }),
+        )
+        .unwrap();
+        assert_eq!(slots(&w)[0]["name"], "Harbour");
+        assert_eq!(slots(&w)[0]["note"], "gulls at dawn");
+        call(
+            &w,
+            "swap_slots",
+            serde_json::json!({ "root": root_s, "a": 0, "b": 1 }),
+        )
+        .unwrap();
+        assert_eq!(slots(&w)[0]["name"], "");
+        assert_eq!(slots(&w)[1]["name"], "Harbour");
+
+        // A broken names file shows in the card check and stops moves until
+        // it is removed.
+        std::fs::write(root.join("mgreel.json"), "{").unwrap();
+        let check = json(call(&w, "check_card", serde_json::json!({ "root": root_s })).unwrap());
+        assert!(check["namesError"].is_string());
+        assert!(
+            call(
+                &w,
+                "swap_slots",
+                serde_json::json!({ "root": root_s, "a": 0, "b": 1 }),
+            )
+            .is_err()
+        );
+        call(&w, "remove_names", serde_json::json!({ "root": root_s })).unwrap();
+        let check = json(call(&w, "check_card", serde_json::json!({ "root": root_s })).unwrap());
+        assert!(check["namesError"].is_null());
+        assert!(!root.join("mgreel.json").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
