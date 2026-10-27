@@ -254,13 +254,20 @@ impl Card {
             let mut entries: Vec<_> = entries.flatten().collect();
             entries.sort_by_key(|e| e.file_name());
             for e in entries {
+                // A link can lead off the card, so links are left alone.
+                let Ok(kind) = e.file_type() else {
+                    continue;
+                };
+                if kind.is_symlink() {
+                    continue;
+                }
                 let name = e.file_name().to_string_lossy().into_owned();
                 let path = e.path();
                 if is_clutter(&name) {
                     clutter.push(path);
                 } else if name.starts_with('.') {
                     continue;
-                } else if path.is_dir() {
+                } else if kind.is_dir() {
                     if depth == 0 {
                         dirs.push((path, depth + 1));
                     }
@@ -290,7 +297,8 @@ impl Card {
         for issue in self.issues() {
             if let CardIssue::Clutter { paths } = issue {
                 for path in paths {
-                    fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+                    fs::remove_file(&path)
+                        .with_context(|| format!("removing {}", path.display()))?;
                     removed += 1;
                 }
             }
@@ -321,8 +329,9 @@ impl Card {
             bail!("{} isn't a file on this card", path.display());
         }
         let bytes = Reel::open(path)?.to_wav_bytes()?;
-        self.write_slot(index, &bytes, backup_dir)?;
+        // Back up first, so a failure here leaves the slot empty to retry.
         backup_file(path, backup_dir)?;
+        self.write_slot(index, &bytes, backup_dir)?;
         fs::remove_file(path)?;
         Ok(bytes)
     }
@@ -339,7 +348,9 @@ impl Card {
         let target = if name.eq_ignore_ascii_case(OPTIONS_FILE) {
             self.options_path()
         } else {
-            self.slot_path(slot_index(&name).with_context(|| format!("{name} isn't a reel or options.txt"))?)
+            self.slot_path(
+                slot_index(&name).with_context(|| format!("{name} isn't a reel or options.txt"))?,
+            )
         };
         let bytes = fs::read(from).with_context(|| format!("reading {}", from.display()))?;
         write_safely(&target, &bytes, backup_dir)?;

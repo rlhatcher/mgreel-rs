@@ -109,7 +109,10 @@ pub fn auto_slice_keeping(left: &[f32], right: &[f32], options: Options, keep: &
     if keep.is_empty() {
         return auto_slice(left, right, options);
     }
-    let budget = options.max_markers.min(MAX_MARKERS).saturating_sub(keep.len());
+    let budget = options
+        .max_markers
+        .min(MAX_MARKERS)
+        .saturating_sub(keep.len());
     let bounds: Vec<usize> = std::iter::once(0)
         .chain(keep.iter().map(|&k| k as usize))
         .chain(std::iter::once(frames))

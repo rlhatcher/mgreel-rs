@@ -2,17 +2,17 @@
 //! backs up what it replaces into the app's data folder first.
 
 use mgreel_core::card::{self, Card, CardIssue, SlotInfo};
+use mgreel_core::edit::{Clipboard, Op, Session, Span, Stereo};
 use mgreel_core::history::{self, BackupKind};
 use mgreel_core::options::{self, Kind, OptionsFile};
 use mgreel_core::reel::{self, Problem};
 use mgreel_core::riff::{self, Format};
-use mgreel_core::edit::{Clipboard, Op, Session, Span, Stereo};
 use mgreel_core::slice;
 use mgreel_core::{BuildOptions, Clip, Reel, ReelFile};
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
@@ -196,12 +196,18 @@ fn snapshot_new_cards(app: &AppHandle, cards: &[Card]) {
                     files,
                     error: None,
                 },
-                Err(e) => SnapshotDto {
-                    root,
-                    label: card.label(),
-                    files: Vec::new(),
-                    error: Some(e),
-                },
+                Err(e) => {
+                    // Let the next look at /Volumes try again.
+                    if let Ok(mut handled) = app.state::<Snapshots>().handled.lock() {
+                        handled.remove(&root);
+                    }
+                    SnapshotDto {
+                        root,
+                        label: card.label(),
+                        files: Vec::new(),
+                        error: Some(e),
+                    }
+                }
             };
             let _ = app.emit("card-snapshot", dto);
         });
@@ -299,7 +305,12 @@ async fn convert_slot(app: AppHandle, root: String, index: usize) -> CmdResult<(
 }
 
 #[tauri::command]
-async fn adopt_file<R: Runtime>(app: AppHandle<R>, root: String, path: String, index: usize) -> CmdResult<()> {
+async fn adopt_file<R: Runtime>(
+    app: AppHandle<R>,
+    root: String,
+    path: String,
+    index: usize,
+) -> CmdResult<()> {
     check_slot(index)?;
     let card = Card::new(root);
     let bytes = card
@@ -342,7 +353,12 @@ async fn list_backups<R: Runtime>(app: AppHandle<R>, root: String) -> CmdResult<
 
 /// Put one file from this card's backups back on the card.
 #[tauri::command]
-async fn restore_file<R: Runtime>(app: AppHandle<R>, root: String, dir: String, file: String) -> CmdResult<()> {
+async fn restore_file<R: Runtime>(
+    app: AppHandle<R>,
+    root: String,
+    dir: String,
+    file: String,
+) -> CmdResult<()> {
     let card = Card::new(root);
     let backups = backup_dir(&app, &card)?;
     let from = Path::new(&dir).join(&file);
@@ -438,11 +454,7 @@ fn with_open<T>(
 /// Layout, little-endian: u32 marker count, the u64 audio id, the markers as
 /// u32 frames, then every left sample followed by every right sample as f32.
 #[tauri::command]
-async fn load_reel(
-    editing: State<'_, Editing>,
-    root: String,
-    index: usize,
-) -> CmdResult<Response> {
+async fn load_reel(editing: State<'_, Editing>, root: String, index: usize) -> CmdResult<Response> {
     check_slot(index)?;
     let bytes = std::fs::read(Card::new(&root).slot_path(index)).map_err(err)?;
     let file = ReelFile::parse(&bytes).map_err(err)?;
@@ -495,7 +507,9 @@ impl Status {
 /// left then right samples as f32.
 fn edit_result(status: Status, markers: Option<&[u32]>, spans: &[Span]) -> Response {
     let samples: usize = spans.iter().map(|s| s.inserted.len() * 2).sum();
-    let mut out = Vec::with_capacity(32 + markers.map_or(0, <[u32]>::len) * 4 + spans.len() * 12 + samples * 4);
+    let mut out = Vec::with_capacity(
+        32 + markers.map_or(0, <[u32]>::len) * 4 + spans.len() * 12 + samples * 4,
+    );
     let mut put = |v: u32| out.extend_from_slice(&v.to_le_bytes());
     put(status.pos as u32);
     put(status.oldest as u32);
@@ -522,7 +536,11 @@ fn edit_result(status: Status, markers: Option<&[u32]>, spans: &[Span]) -> Respo
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 enum EditOp {
     Delete,
     Duplicate,
@@ -630,7 +648,9 @@ async fn paste_splices(
 
 fn open_clip(path: &str) -> CmdResult<Stereo> {
     let clip = Clip::open(Path::new(path)).map_err(|e| {
-        let name = Path::new(path).file_name().map_or(path.into(), |n| n.to_string_lossy());
+        let name = Path::new(path)
+            .file_name()
+            .map_or(path.into(), |n| n.to_string_lossy());
         format!("{name}: {e:#}")
     })?;
     Ok(Stereo::new(clip.left, clip.right))
@@ -647,7 +667,10 @@ async fn insert_files(
     at: usize,
     paths: Vec<String>,
 ) -> CmdResult<Response> {
-    let pieces = paths.iter().map(|p| open_clip(p)).collect::<CmdResult<Vec<_>>>()?;
+    let pieces = paths
+        .iter()
+        .map(|p| open_clip(p))
+        .collect::<CmdResult<Vec<_>>>()?;
     with_open(&editing, &root, index, |open| {
         let s = &mut open.session;
         let markers = s.insert(&markers, at, &pieces).map_err(err)?;
@@ -703,7 +726,9 @@ async fn export_splices(
     let pieces = with_open(&editing, &root, index, |open| {
         open.session.splices(&markers, first, last).map_err(err)
     })?;
-    let stem = card::slot_file_name(index).trim_end_matches(".wav").to_string();
+    let stem = card::slot_file_name(index)
+        .trim_end_matches(".wav")
+        .to_string();
     let mut written = Vec::new();
     for (k, piece) in pieces.into_iter().enumerate() {
         let bytes = Reel {
@@ -846,7 +871,12 @@ async fn auto_slice(
     };
     with_open(&editing, &root, index, |open| {
         let audio = open.session.audio();
-        Ok(slice::auto_slice_keeping(&audio.left, &audio.right, options, &keep))
+        Ok(slice::auto_slice_keeping(
+            &audio.left,
+            &audio.right,
+            options,
+            &keep,
+        ))
     })
 }
 
@@ -1167,10 +1197,12 @@ mod tests {
     //! against a card folder in the temp directory.
 
     use super::*;
-    use tauri::ipc::{CallbackFn, InvokeBody, InvokeResponseBody};
-    use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, MockRuntime, INVOKE_KEY};
-    use tauri::webview::InvokeRequest;
     use tauri::WebviewWindow;
+    use tauri::ipc::{CallbackFn, InvokeBody, InvokeResponseBody};
+    use tauri::test::{
+        INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder, mock_context, noop_assets,
+    };
+    use tauri::webview::InvokeRequest;
 
     fn window() -> (tauri::App<MockRuntime>, WebviewWindow<MockRuntime>) {
         let app = mock_builder()
@@ -1182,9 +1214,9 @@ mod tests {
                 copy_splices,
                 paste_splices,
                 seek_history,
-            insert_files,
-            put_file,
-            export_splices,
+                insert_files,
+                put_file,
+                export_splices,
                 save_reel,
                 check_card,
                 adopt_file,
@@ -1291,19 +1323,33 @@ mod tests {
         assert_eq!(check["wrongFilesystem"], serde_json::Value::Null);
 
         let stray = check["stray"][0]["path"].as_str().unwrap();
-        call(&w, "adopt_file", serde_json::json!({ "root": root_s, "path": stray, "index": 1 })).unwrap();
+        call(
+            &w,
+            "adopt_file",
+            serde_json::json!({ "root": root_s, "path": stray, "index": 1 }),
+        )
+        .unwrap();
         assert_eq!(std::fs::read(root.join("mg2.wav")).unwrap(), reel(0.2));
         assert!(!root.join("field/rain.wav").exists());
 
         // The adopted file's backup can go back on the card, but nothing
         // outside the backups folder can.
-        let backups = json(call(&w, "list_backups", serde_json::json!({ "root": root_s })).unwrap());
+        let backups =
+            json(call(&w, "list_backups", serde_json::json!({ "root": root_s })).unwrap());
         let dir = backups[0]["dir"].as_str().unwrap();
         assert_eq!(backups[0]["kind"], "beforeChange");
         assert_eq!(backups[0]["files"][0], "rain.wav");
-        let refused = call(&w, "restore_file", serde_json::json!({ "root": root_s, "dir": dir, "file": "../../../etc/hosts" }));
+        let refused = call(
+            &w,
+            "restore_file",
+            serde_json::json!({ "root": root_s, "dir": dir, "file": "../../../etc/hosts" }),
+        );
         assert!(refused.is_err());
-        let refused = call(&w, "restore_file", serde_json::json!({ "root": root_s, "dir": root_s, "file": "mg1.wav" }));
+        let refused = call(
+            &w,
+            "restore_file",
+            serde_json::json!({ "root": root_s, "dir": root_s, "file": "mg1.wav" }),
+        );
         assert!(refused.is_err(), "the card isn't a backup folder");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1329,7 +1375,9 @@ mod tests {
         let (app, w) = window();
         let args = |extra: serde_json::Value| {
             let mut v = serde_json::json!({ "root": root_s, "index": 0 });
-            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
             v
         };
 
@@ -1363,10 +1411,20 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!((spans[0].0, spans[0].1, spans[0].2.len()), (4800, 0, 9600));
         assert!(spans[0].2.iter().all(|&x| x == 0.2));
-        let (pos, ..) = decode(&raw(call(&w, "seek_history", args(serde_json::json!({ "pos": 1 }))).unwrap()));
+        let (pos, ..) = decode(&raw(call(
+            &w,
+            "seek_history",
+            args(serde_json::json!({ "pos": 1 })),
+        )
+        .unwrap()));
         assert_eq!(pos, 1);
         // Asking for position 0 with the wrong state id is refused.
-        let stale = call(&w, "seek_history", args(serde_json::json!({ "pos": 0, "state": 99 }))).unwrap_err();
+        let stale = call(
+            &w,
+            "seek_history",
+            args(serde_json::json!({ "pos": 0, "state": 99 })),
+        )
+        .unwrap_err();
         assert!(stale.to_string().contains("replaced"), "{stale}");
 
         // A gain change in dB arrives with camelCase fields.
@@ -1380,7 +1438,12 @@ mod tests {
         assert!((spans[0].2[0] - 0.05).abs() < 1e-4);
 
         // Copy the first splice and paste it at the end.
-        call(&w, "copy_splices", args(serde_json::json!({ "markers": [4800], "first": 0, "last": 0 }))).unwrap();
+        call(
+            &w,
+            "copy_splices",
+            args(serde_json::json!({ "markers": [4800], "first": 0, "last": 0 })),
+        )
+        .unwrap();
         let (_, _, markers, _) = decode(&raw(call(
             &w,
             "paste_splices",
@@ -1404,7 +1467,12 @@ mod tests {
         )
         .unwrap()));
         assert_eq!(markers, Some(vec![480, 5280, 19680]));
-        call(&w, "seek_history", args(serde_json::json!({ "pos": pos - 1 }))).unwrap();
+        call(
+            &w,
+            "seek_history",
+            args(serde_json::json!({ "pos": pos - 1 })),
+        )
+        .unwrap();
 
         // Mix it half and half into the first splice.
         let (_, _, markers, spans) = decode(&raw(call(
@@ -1415,7 +1483,10 @@ mod tests {
         .unwrap()));
         assert_eq!(markers, Some(vec![4800, 19200]));
         assert!((spans[0].2[0] - (0.05 * 0.5 + 0.7 * 0.5)).abs() < 1e-4);
-        assert!((spans[0].2[480] - 0.05 * 0.5).abs() > 0.01, "past the file the splice is unchanged");
+        assert!(
+            (spans[0].2[480] - 0.05 * 0.5).abs() > 0.01,
+            "past the file the splice is unchanged"
+        );
 
         // Export the last two splices.
         let out = root.join("export");
@@ -1436,7 +1507,12 @@ mod tests {
         call(&w, "seek_history", args(serde_json::json!({ "pos": 3 }))).unwrap();
 
         // Save writes the edited audio and markers.
-        call(&w, "save_reel", args(serde_json::json!({ "markers": [4800, 19200] }))).unwrap();
+        call(
+            &w,
+            "save_reel",
+            args(serde_json::json!({ "markers": [4800, 19200] })),
+        )
+        .unwrap();
         let saved = Reel::open(&card.slot_path(0)).unwrap();
         assert_eq!(saved.frames(), 24000);
         assert_eq!(saved.markers, vec![4800, 19200]);
@@ -1454,23 +1530,48 @@ mod tests {
         )
         .unwrap()));
         assert_eq!(pos, 3);
-        call(&w, "save_reel", args(serde_json::json!({ "markers": [4800] }))).unwrap();
+        call(
+            &w,
+            "save_reel",
+            args(serde_json::json!({ "markers": [4800] })),
+        )
+        .unwrap();
         let saved = Reel::open(&card.slot_path(0)).unwrap();
         assert_eq!(saved.frames(), 19200);
-        assert!((saved.left[4800] - 0.03).abs() < 1e-4, "{}", saved.left[4800]);
+        assert!(
+            (saved.left[4800] - 0.03).abs() < 1e-4,
+            "{}",
+            saved.left[4800]
+        );
 
         // Markers changed on the card, as splicing on the module does, make
         // save refuse even though the audio is the same.
         let mut on_card = ReelFile::open(&card.slot_path(0)).unwrap();
         on_card.set_markers(&[4800, 9600]);
         std::fs::write(card.slot_path(0), on_card.to_bytes()).unwrap();
-        let refused = call(&w, "save_reel", args(serde_json::json!({ "markers": [4800] }))).unwrap_err();
-        assert!(refused.to_string().contains("changed on the card"), "{refused}");
+        let refused = call(
+            &w,
+            "save_reel",
+            args(serde_json::json!({ "markers": [4800] })),
+        )
+        .unwrap_err();
+        assert!(
+            refused.to_string().contains("changed on the card"),
+            "{refused}"
+        );
 
         // A different file in the slot makes save refuse.
         std::fs::write(card.slot_path(0), reel.to_wav_bytes().unwrap()).unwrap();
-        let refused = call(&w, "save_reel", args(serde_json::json!({ "markers": [4800] }))).unwrap_err();
-        assert!(refused.to_string().contains("changed on the card"), "{refused}");
+        let refused = call(
+            &w,
+            "save_reel",
+            args(serde_json::json!({ "markers": [4800] })),
+        )
+        .unwrap_err();
+        assert!(
+            refused.to_string().contains("changed on the card"),
+            "{refused}"
+        );
 
         // Clean up the card and the backups the saves made.
         let backups = backup_dir(app.handle(), &card).unwrap();

@@ -166,14 +166,20 @@ fn lists_stray_audio_and_clutter() {
     fs::write(root.join("samples/kick.aif"), b"x").unwrap();
     fs::create_dir(root.join(".Trashes")).unwrap();
     fs::write(root.join(".Trashes/lost.wav"), b"x").unwrap();
+    // A link to a folder off the card is left alone, clutter and all.
+    let outside = tempdir();
+    fs::write(outside.join("._keep"), b"x").unwrap();
+    fs::write(outside.join("song.wav"), b"x").unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
 
     let issues = card.issues();
     let stray: Vec<(String, bool)> = issues
         .iter()
         .filter_map(|i| match i {
-            CardIssue::Stray { path, wav } => {
-                Some((path.strip_prefix(&root).unwrap().display().to_string(), *wav))
-            }
+            CardIssue::Stray { path, wav } => Some((
+                path.strip_prefix(&root).unwrap().display().to_string(),
+                *wav,
+            )),
             _ => None,
         })
         .collect();
@@ -188,9 +194,13 @@ fn lists_stray_audio_and_clutter() {
     assert!(matches!(issues.last(), Some(CardIssue::Clutter { paths }) if paths.len() == 2));
 
     assert_eq!(card.remove_clutter().unwrap(), 2);
+    assert!(outside.join("._keep").exists());
     assert!(!root.join("._mg1.wav").exists());
     assert!(root.join("mg1.wav").exists());
-    assert!(!card.issues().iter().any(|i| matches!(i, CardIssue::Clutter { .. })));
+    assert!(!card
+        .issues()
+        .iter()
+        .any(|i| matches!(i, CardIssue::Clutter { .. })));
 }
 
 #[test]
@@ -219,7 +229,9 @@ fn adopts_a_stray_file_into_a_slot() {
     write_cd_wav(&stray);
 
     assert!(card.adopt(&stray, 0, &backups).is_err(), "slot 0 is taken");
-    assert!(card.adopt(&root.join("in/../../elsewhere.wav"), 1, &backups).is_err());
+    assert!(card
+        .adopt(&root.join("in/../../elsewhere.wav"), 1, &backups)
+        .is_err());
     card.adopt(&stray, 1, &backups).unwrap();
     assert!(!stray.exists());
     assert_eq!(card.slots()[1].markers, vec![24_000]);
@@ -254,7 +266,10 @@ fn snapshots_reels_changed_on_the_card() {
     assert!(history::snapshot(&card, &backups).unwrap().is_none());
 
     let kinds: Vec<BackupKind> = history::list(&backups).iter().map(|b| b.kind).collect();
-    assert_eq!(kinds.iter().filter(|k| **k == BackupKind::FromCard).count(), 2);
+    assert_eq!(
+        kinds.iter().filter(|k| **k == BackupKind::FromCard).count(),
+        2
+    );
     assert!(!kinds.contains(&BackupKind::WholeCard));
 }
 
@@ -270,13 +285,18 @@ fn restores_one_file_from_a_backup() {
 
     card.restore_file(&whole.join("mg1.wav"), &backups).unwrap();
     assert_eq!(fs::read(root.join("mg1.wav")).unwrap(), reel_bytes(10));
-    card.restore_file(&whole.join("options.txt"), &backups).unwrap();
+    card.restore_file(&whole.join("options.txt"), &backups)
+        .unwrap();
     assert_eq!(fs::read_to_string(card.options_path()).unwrap(), "omod 0\n");
 
     let list = history::list(&backups);
-    assert!(list.iter().any(|b| b.kind == BackupKind::WholeCard && b.dir == whole));
+    assert!(list
+        .iter()
+        .any(|b| b.kind == BackupKind::WholeCard && b.dir == whole));
     assert!(list.iter().any(|b| b.kind == BackupKind::BeforeChange));
-    assert!(card.restore_file(&root.join("notes.txt"), &backups).is_err());
+    assert!(card
+        .restore_file(&root.join("notes.txt"), &backups)
+        .is_err());
 }
 
 fn walk(dir: &Path) -> Vec<PathBuf> {
