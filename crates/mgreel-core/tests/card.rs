@@ -376,6 +376,36 @@ fn names_saved_at_once_all_land() {
 }
 
 #[test]
+fn restored_names_survive_names_saved_at_once() {
+    let root = tempdir();
+    let backups = tempdir();
+    let card = make_card(&root, &[]);
+    let saved = tempdir();
+    let mut names = mgreel_core::names::Names::default();
+    names.set(31, named("from the backup"));
+    fs::write(saved.join(NAMES_FILE), names.to_json()).unwrap();
+    std::thread::scope(|s| {
+        for i in 0..8 {
+            let card = &card;
+            s.spawn(move || {
+                for n in 0..100 {
+                    card.set_name(i, named(&format!("reel {i} take {n}")))
+                        .unwrap();
+                }
+            });
+        }
+        // Restores while the saves run, so some land between a save's read
+        // and its write.
+        for _ in 0..20 {
+            card.restore_file(&saved.join(NAMES_FILE), &backups)
+                .unwrap();
+        }
+    });
+    // No save that read the names before the restore wrote them back after.
+    assert_eq!(name_of(&card, 31), "from the backup");
+}
+
+#[test]
 fn unreadable_names_stop_moves() {
     let root = tempdir();
     let backups = tempdir();

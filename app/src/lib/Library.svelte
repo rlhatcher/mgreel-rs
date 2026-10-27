@@ -112,6 +112,17 @@
     }
   }
 
+  /**
+   * After a dialog: true when the card it was opened on is still the one
+   * shown. A card taken out while the dialog is up switches to another, and
+   * the action must not run there.
+   */
+  function stillOn(card: string) {
+    if (card === root) return true;
+    notify("The card changed or was removed while the dialog was open, so nothing was changed.", true);
+    return false;
+  }
+
   // Reels move with pointer events, not HTML5 drag and drop, because the
   // Tauri window takes drag events for its own file drop.
   /** A press on a reel. It turns into a drag once the pointer moves. */
@@ -220,11 +231,12 @@
   }
 
   async function dropNames() {
+    const card = root;
     const yes = await ask(
       "Remove mgreel.json? Every reel on the card loses its name and note. A copy goes to the backups folder.",
       { title: "Remove reel names", kind: "warning" },
     );
-    if (!yes) return;
+    if (!yes || !stillOn(card)) return;
     await run((card) => removeNames(card), "Removed mgreel.json");
     await recheck(root);
   }
@@ -282,10 +294,14 @@
     }
   }
 
-  // Switching cards stops the preview, and so does leaving.
+  // Switching cards stops the preview and closes another card's history,
+  // and so does leaving.
   $effect(() => {
     void root;
-    return stopPlaying;
+    return () => {
+      stopPlaying();
+      history = null;
+    };
   });
 
   async function eject() {
@@ -308,8 +324,10 @@
       history = null;
       return;
     }
+    const card = root;
     try {
-      history = await listBackups(root);
+      const list = await listBackups(card);
+      if (card === root) history = list;
     } catch (e) {
       notify(errorText(e), true);
     }
@@ -322,21 +340,24 @@
   };
 
   async function restoreOne(backup: Backup, file: string) {
+    const card = root;
     const yes = await ask(`Put this copy of ${file} back on the card? What's there now goes to the backups folder first.`, {
       title: "Restore file",
       kind: "warning",
     });
-    if (!yes) return;
+    if (!yes || !stillOn(card)) return;
     await run((card) => restoreFile(card, backup.dir, file), `Restored ${file}`);
-    history = await listBackups(root).catch(() => history);
+    const list = await listBackups(card).catch(() => null);
+    if (list && card === root && history) history = list;
   }
 
   async function clear(slot: Slot) {
+    const card = root;
     const yes = await ask(`Remove ${slot.fileName} from the card? A copy goes to the backups folder.`, {
       title: "Remove reel",
       kind: "warning",
     });
-    if (yes) run((card) => clearSlot(card, slot.index), `Removed ${slot.fileName}`);
+    if (yes && stillOn(card)) run((card) => clearSlot(card, slot.index), `Removed ${slot.fileName}`);
   }
 
   async function backup() {
@@ -354,13 +375,14 @@
   }
 
   async function restore() {
-    const from = await open({ directory: true, defaultPath: await backupsFolder(root), title: "Choose a backup folder" });
+    const card = root;
+    const from = await open({ directory: true, defaultPath: await backupsFolder(card), title: "Choose a backup folder" });
     if (typeof from !== "string") return;
     const yes = await ask(`Replace every reel and options.txt on the card with the contents of ${from}? The card is backed up first.`, {
       title: "Restore backup",
       kind: "warning",
     });
-    if (yes) run((card) => restoreCard(card, from), "Restored backup");
+    if (yes && stillOn(card)) run((card) => restoreCard(card, from), "Restored backup");
   }
 
   async function reveal() {
