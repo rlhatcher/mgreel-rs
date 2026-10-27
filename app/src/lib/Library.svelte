@@ -251,13 +251,19 @@
     if (again) return;
     const run = playRun;
     playing = slot.index;
-    // Made during the click: WebKit may keep a context made after a long
-    // load suspended, and the reel can take a while to load.
-    const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
-    if (ctx.state === "suspended") ctx.resume();
-    const mine: { ctx: AudioContext; source: AudioBufferSourceNode | null } = { ctx, source: null };
-    player = mine;
+    const fail = (e: unknown) => {
+      if (run === playRun) {
+        stopPlaying();
+        notify(errorText(e), true);
+      }
+    };
     try {
+      // Made during the click: WebKit may keep a context made after a long
+      // load suspended, and the reel can take a while to load.
+      const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
+      const mine: { ctx: AudioContext; source: AudioBufferSourceNode | null } = { ctx, source: null };
+      player = mine;
+      if (ctx.state === "suspended") ctx.resume().catch(fail);
       const reel = await previewReel(root, slot.index);
       if (run !== playRun) return;
       const buffer = ctx.createBuffer(2, Math.max(1, reel.left.length), SAMPLE_RATE);
@@ -272,10 +278,7 @@
       source.start();
       mine.source = source;
     } catch (e) {
-      if (run === playRun) {
-        stopPlaying();
-        notify(errorText(e), true);
-      }
+      fail(e);
     }
   }
 
