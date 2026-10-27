@@ -165,18 +165,31 @@
       });
   }
 
-  /** Save a name or note when its field loses focus or Enter is pressed. */
-  async function saveLabel(slot: Slot, field: "name" | "note", input: HTMLInputElement) {
-    const name = field === "name" ? input.value.trim() : slot.name;
-    const note = field === "note" ? input.value.trim() : slot.note;
-    if (name === slot.name && note === slot.note) return;
-    try {
-      await setReelName(root, slot.index, name, note);
-      await onchanged();
-    } catch (e) {
-      input.value = slot[field];
-      notify(errorText(e), true);
-    }
+  /** Saves run one at a time, so each one sends what the last one wrote. */
+  let labelSaves: Promise<void> = Promise.resolve();
+
+  /**
+   * Save a name or note when its field loses focus or Enter is pressed. Both
+   * fields are read from the card, not from `slot`, which may not have
+   * caught up with the save before this one.
+   */
+  function saveLabel(slot: Slot, field: "name" | "note", input: HTMLInputElement) {
+    const fields = input.closest("li")!.querySelectorAll<HTMLInputElement>("input.label");
+    const name = fields[0].value.trim();
+    const note = fields[1].value.trim();
+    const index = slot.index;
+    labelSaves = labelSaves.then(async () => {
+      // The slots as the last save left them.
+      const now = slots[index];
+      if (name === now.name && note === now.note) return;
+      try {
+        await setReelName(root, index, name, note);
+        await onchanged();
+      } catch (e) {
+        input.value = slots[index][field];
+        notify(errorText(e), true);
+      }
+    });
   }
 
   function labelKey(e: KeyboardEvent, slot: Slot, field: "name" | "note") {

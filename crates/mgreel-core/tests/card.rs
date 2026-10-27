@@ -359,6 +359,23 @@ fn a_new_reel_in_an_empty_slot_starts_unnamed() {
 }
 
 #[test]
+fn names_saved_at_once_all_land() {
+    let root = tempdir();
+    let card = make_card(&root, &[]);
+    std::thread::scope(|s| {
+        for i in 0..16 {
+            let card = &card;
+            s.spawn(move || card.set_name(i, named(&format!("reel {i}"))).unwrap());
+        }
+    });
+    for i in 0..16 {
+        assert_eq!(name_of(&card, i), format!("reel {i}"));
+    }
+    // No temporary files left behind.
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+}
+
+#[test]
 fn unreadable_names_stop_moves() {
     let root = tempdir();
     let backups = tempdir();
