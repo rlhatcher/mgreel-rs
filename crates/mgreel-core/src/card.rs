@@ -322,8 +322,8 @@ impl Card {
         };
         let renamed = self.rename_into(order, &current);
         match (renamed, names_tmp) {
-            (Ok(()), Some(tmp)) => fs::rename(&tmp, self.names_path())
-                .with_context(|| format!("replacing {}", self.names_path().display())),
+            (Ok(()), Some(tmp)) => replace_with(&tmp, &self.names_path())
+                .context("the reels moved, but their names didn't move with them"),
             (Ok(()), None) => Ok(()),
             (Err(e), tmp) => {
                 if let Some(tmp) = tmp {
@@ -449,8 +449,8 @@ impl Card {
     }
 
     /// Put a file from a backup folder back on the card: a reel into the
-    /// slot its name gives, or `options.txt`. What it replaces is backed up
-    /// first. Returns the file's bytes.
+    /// slot its name gives, `options.txt` or `mgreel.json`. What it replaces
+    /// is backed up first. Returns the file's bytes.
     pub fn restore_file(&self, from: &Path, backup_dir: &Path) -> Result<Vec<u8>> {
         let name = from
             .file_name()
@@ -467,6 +467,9 @@ impl Card {
             self.forget_if_empty(index)?;
             self.slot_path(index)
         };
+        // Taken after forget_if_empty, which takes it too. Held so a name
+        // saved at the same time can't write over the restored names.
+        let _lock = (target == self.names_path()).then(names_lock);
         let bytes = fs::read(from).with_context(|| format!("reading {}", from.display()))?;
         write_safely(&target, &bytes, backup_dir)?;
         Ok(bytes)
@@ -555,8 +558,13 @@ fn write_safely(target: &Path, bytes: &[u8], backup_dir: &Path) -> Result<()> {
 /// Write `bytes` to a temporary file beside `target`, then rename it over.
 fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = stage(target, bytes)?;
-    fs::rename(&tmp, target).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
+    replace_with(&tmp, target)
+}
+
+/// Rename a file from [`stage`] over `target`, or remove it if that fails.
+fn replace_with(tmp: &Path, target: &Path) -> Result<()> {
+    fs::rename(tmp, target).map_err(|e| {
+        let _ = fs::remove_file(tmp);
         anyhow::Error::from(e).context(format!("replacing {}", target.display()))
     })
 }
@@ -660,6 +668,20 @@ mod tests {
         assert_eq!(slot_index("mgx.wav"), None);
         assert_eq!(slot_index("mg0.wav"), None);
         assert_eq!(slot_index("._mg1.wav"), None);
+    }
+
+    #[test]
+    fn a_failed_replace_removes_the_staged_file() {
+        let dir = std::env::temp_dir().join(format!("mgreel-replace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        // A folder with something in it can't be renamed over.
+        let target = dir.join(NAMES_FILE);
+        fs::create_dir_all(target.join("inside")).unwrap();
+        let tmp = stage(&target, b"{}").unwrap();
+        assert!(replace_with(&tmp, &target).is_err());
+        assert!(!tmp.exists());
+        assert!(target.join("inside").is_dir());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
