@@ -35,7 +35,8 @@
     onedit: (index: number) => void;
     onbuild: (index: number) => void;
     onchanged: () => Promise<void>;
-    onejected: () => void;
+    /** Called with the card that was ejected. */
+    onejected: (root: string) => void;
     notify: (text: string, error?: boolean) => void;
   };
   let { root, slots, onedit, onbuild, onchanged, onejected, notify }: Props = $props();
@@ -82,14 +83,19 @@
       });
   }
 
-  async function run(action: () => Promise<unknown>, done: string) {
+  /**
+   * Change the card shown now. The action gets that card, so switching cards
+   * while queued name saves finish can't send it to the other one.
+   */
+  async function run(action: (card: string) => Promise<unknown>, done: string) {
+    const card = root;
     // The reels may move or change, so the preview stops first.
     stopPlaying();
     busy = true;
     try {
       // A queued name save names a slot, so it lands before reels move.
       await labelSaves;
-      await action();
+      await action(card);
       await onchanged();
       notify(done);
     } catch (e) {
@@ -135,9 +141,9 @@
     if (from === null || to === null || from === to) return;
     // Option-drop swaps; a plain drop inserts and shifts the slots between.
     if (e.altKey) {
-      run(() => swapSlots(root, from, to), `Swapped ${slots[from].fileName} and ${slots[to].fileName}`);
+      run((card) => swapSlots(card, from, to), `Swapped ${slots[from].fileName} and ${slots[to].fileName}`);
     } else {
-      run(() => moveSlot(root, from, to), `Moved ${slots[from].fileName} to ${slots[to].fileName}`);
+      run((card) => moveSlot(card, from, to), `Moved ${slots[from].fileName} to ${slots[to].fileName}`);
     }
   }
 
@@ -147,13 +153,13 @@
   }
 
   function convert(slot: Slot) {
-    run(() => convertSlot(root, slot.index), `Converted ${slot.fileName} to 48 kHz 32-bit float stereo`);
+    run((card) => convertSlot(card, slot.index), `Converted ${slot.fileName} to 48 kHz 32-bit float stereo`);
   }
 
   function adopt(path: string, name: string) {
     const target = freeSlot;
     if (!target) return;
-    run(() => adoptFile(root, path, target.index), `Put ${name} in ${target.fileName}`);
+    run((card) => adoptFile(card, path, target.index), `Put ${name} in ${target.fileName}`);
   }
 
   function tidy() {
@@ -212,7 +218,7 @@
       { title: "Remove reel names", kind: "warning" },
     );
     if (!yes) return;
-    await run(() => removeNames(root), "Removed mgreel.json");
+    await run((card) => removeNames(card), "Removed mgreel.json");
     await recheck(root);
   }
 
@@ -267,11 +273,13 @@
   });
 
   async function eject() {
+    // The card picker stays live while saves finish, so hold on to this card.
+    const card = root;
     busy = true;
     try {
       await labelSaves;
-      await ejectCard(root);
-      onejected();
+      await ejectCard(card);
+      onejected(card);
     } catch (e) {
       notify(errorText(e), true);
     } finally {
@@ -303,7 +311,7 @@
       kind: "warning",
     });
     if (!yes) return;
-    await run(() => restoreFile(root, backup.dir, file), `Restored ${file}`);
+    await run((card) => restoreFile(card, backup.dir, file), `Restored ${file}`);
     history = await listBackups(root).catch(() => history);
   }
 
@@ -312,14 +320,15 @@
       title: "Remove reel",
       kind: "warning",
     });
-    if (yes) run(() => clearSlot(root, slot.index), `Removed ${slot.fileName}`);
+    if (yes) run((card) => clearSlot(card, slot.index), `Removed ${slot.fileName}`);
   }
 
   async function backup() {
+    const card = root;
     busy = true;
     try {
       await labelSaves;
-      const dir = await backupCard(root);
+      const dir = await backupCard(card);
       notify(`Backed up to ${dir}`);
     } catch (e) {
       notify(errorText(e), true);
@@ -335,7 +344,7 @@
       title: "Restore backup",
       kind: "warning",
     });
-    if (yes) run(() => restoreCard(root, from), "Restored backup");
+    if (yes) run((card) => restoreCard(card, from), "Restored backup");
   }
 
   async function reveal() {

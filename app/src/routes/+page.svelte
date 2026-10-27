@@ -200,8 +200,8 @@
         onedit={edit}
         onbuild={buildInto}
         onchanged={refreshSlots}
-        onejected={() => {
-          ejected = root;
+        onejected={(card) => {
+          ejected = card;
           refreshCards();
         }}
         {notify}
