@@ -28,6 +28,7 @@
     type Slot,
   } from "./api";
   import { reelSpots } from "./reelmode";
+  import { nameSaves, queueNameSave } from "./saves";
 
   type Props = {
     root: string;
@@ -101,7 +102,7 @@
     busy = true;
     try {
       // A queued name save names a slot, so it lands before reels move.
-      await labelSaves;
+      await nameSaves();
       await action(card);
       await onchanged();
       notify(done);
@@ -191,9 +192,6 @@
       });
   }
 
-  /** Saves run one at a time, so each one sends what the last one wrote. */
-  let labelSaves: Promise<void> = Promise.resolve();
-
   /**
    * Save a name or note when its field loses focus or Enter is pressed. Both
    * fields are read from the card, not from `slot`, which may not have
@@ -207,7 +205,7 @@
     // The card can change before a queued save runs; the save stays with
     // the card it was typed on.
     const card = root;
-    labelSaves = labelSaves.then(async () => {
+    queueNameSave(async () => {
       // The slots as the last save left them, while still on that card.
       const now = card === root ? slots[index] : null;
       if (now && name === now.name && note === now.note) return;
@@ -309,7 +307,7 @@
     const card = root;
     busy = true;
     try {
-      await labelSaves;
+      await nameSaves();
       await ejectCard(card);
       onejected(card);
     } catch (e) {
@@ -364,7 +362,7 @@
     const card = root;
     busy = true;
     try {
-      await labelSaves;
+      await nameSaves();
       const dir = await backupCard(card);
       notify(`Backed up to ${dir}`);
     } catch (e) {

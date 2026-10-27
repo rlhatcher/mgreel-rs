@@ -8,6 +8,7 @@ use mgreel_core::names::ReelLabel;
 use mgreel_core::options::{self, Kind, OptionsFile};
 use mgreel_core::reel::{self, Problem};
 use mgreel_core::riff::{self, Format};
+use mgreel_core::sets;
 use mgreel_core::slice;
 use mgreel_core::{BuildOptions, Clip, Reel, ReelFile};
 use notify::{RecursiveMode, Watcher};
@@ -160,13 +161,112 @@ async fn backup_card(app: AppHandle, root: String) -> CmdResult<String> {
 }
 
 #[tauri::command]
-async fn restore_card(app: AppHandle, root: String, from: String) -> CmdResult<()> {
+async fn restore_card<R: Runtime>(app: AppHandle<R>, root: String, from: String) -> CmdResult<()> {
     let card = Card::new(root);
     let dir = backup_dir(&app, &card)?;
     card.restore(Path::new(&from), &dir).map_err(err)?;
     let state = app.state::<Snapshots>();
     let _guard = state.lock.lock().map_err(err)?;
     history::remember_card(&card, &dir).map_err(err)
+}
+
+// Sets
+
+/// The folder that holds the sets, `~/Music/Morphagene Sets`.
+struct SetsRoot(PathBuf);
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetDto {
+    name: String,
+    dir: String,
+    reels: Vec<usize>,
+    names: Vec<String>,
+    has_options: bool,
+    /// Milliseconds since 1970.
+    modified: u64,
+}
+
+#[tauri::command]
+async fn list_sets(sets: State<'_, SetsRoot>) -> CmdResult<Vec<SetDto>> {
+    Ok(sets::list(&sets.0)
+        .into_iter()
+        .map(|s| SetDto {
+            name: s.name,
+            dir: s.dir.display().to_string(),
+            reels: s.reels,
+            names: s.names,
+            has_options: s.has_options,
+            modified: s
+                .modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64),
+        })
+        .collect())
+}
+
+/// The sets folder, made if it isn't there yet.
+#[tauri::command]
+async fn sets_folder(sets: State<'_, SetsRoot>) -> CmdResult<String> {
+    std::fs::create_dir_all(&sets.0).map_err(err)?;
+    Ok(sets.0.display().to_string())
+}
+
+#[tauri::command]
+async fn save_set(sets: State<'_, SetsRoot>, root: String, name: String) -> CmdResult<String> {
+    let dir = sets::save(&Card::new(root), &sets.0, &name).map_err(err)?;
+    Ok(dir.display().to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlacedDto {
+    file_name: String,
+    source: String,
+    problems: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkippedDto {
+    source: String,
+    reason: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportDto {
+    name: String,
+    dir: String,
+    placed: Vec<PlacedDto>,
+    skipped: Vec<SkippedDto>,
+}
+
+/// Make a set from a folder of WAV files, such as a downloaded reel pack.
+#[tauri::command]
+async fn import_pack(sets: State<'_, SetsRoot>, from: String) -> CmdResult<ImportDto> {
+    let imported = sets::import(Path::new(&from), &sets.0).map_err(err)?;
+    Ok(ImportDto {
+        name: imported.name,
+        dir: imported.dir.display().to_string(),
+        placed: imported
+            .placed
+            .into_iter()
+            .map(|p| PlacedDto {
+                file_name: card::slot_file_name(p.slot),
+                source: p.source,
+                problems: p.problems.iter().map(Problem::to_string).collect(),
+            })
+            .collect(),
+        skipped: imported
+            .skipped
+            .into_iter()
+            .map(|s| SkippedDto {
+                source: s.source,
+                reason: s.reason,
+            })
+            .collect(),
+    })
 }
 
 // Card safety
@@ -1197,6 +1297,11 @@ pub fn run() {
             app.manage(Editing::default());
             app.manage(SpliceClipboard::default());
             app.manage(Snapshots::default());
+            let music = app
+                .path()
+                .audio_dir()
+                .or_else(|_| app.path().home_dir().map(|home| home.join("Music")))?;
+            app.manage(SetsRoot(music.join("Morphagene Sets")));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1208,6 +1313,10 @@ pub fn run() {
             backups_folder,
             backup_card,
             restore_card,
+            list_sets,
+            sets_folder,
+            save_set,
+            import_pack,
             check_card,
             remove_clutter,
             set_reel_name,
@@ -1251,10 +1360,17 @@ mod tests {
     };
     use tauri::webview::InvokeRequest;
 
+    /// Where the test app keeps its sets.
+    fn test_sets_root() -> PathBuf {
+        std::env::temp_dir().join(format!("mgreel-ipc-sets-{}", std::process::id()))
+    }
+
     fn window() -> (tauri::App<MockRuntime>, WebviewWindow<MockRuntime>) {
         let app = mock_builder()
             .manage(Editing::default())
             .manage(SpliceClipboard::default())
+            .manage(Snapshots::default())
+            .manage(SetsRoot(test_sets_root()))
             .invoke_handler(tauri::generate_handler![
                 load_reel,
                 preview_reel,
@@ -1274,6 +1390,10 @@ mod tests {
                 swap_slots,
                 set_reel_name,
                 remove_names,
+                restore_card,
+                list_sets,
+                save_set,
+                import_pack,
             ])
             .build(mock_context(noop_assets()))
             .unwrap();
@@ -1461,6 +1581,74 @@ mod tests {
         assert!(check["namesError"].is_null());
         assert!(!root.join("mgreel.json").exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sets_through_ipc() {
+        let root = std::env::temp_dir().join(format!("mgreel-ipc-set-card-{}", std::process::id()));
+        let pack = std::env::temp_dir().join(format!("mgreel-ipc-pack-{}", std::process::id()));
+        for dir in [&root, &pack, &test_sets_root()] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&pack).unwrap();
+        let root_s = root.display().to_string();
+        let reel = Reel {
+            left: vec![0.1; 4800],
+            right: vec![0.1; 4800],
+            markers: vec![],
+        }
+        .to_wav_bytes()
+        .unwrap();
+        std::fs::write(root.join("mg1.wav"), &reel).unwrap();
+        std::fs::write(pack.join("Gulls.wav"), &reel).unwrap();
+        let (_app, w) = window();
+        call(
+            &w,
+            "set_reel_name",
+            serde_json::json!({ "root": root_s, "index": 0, "name": "Harbour", "note": "" }),
+        )
+        .unwrap();
+
+        let saved = json(
+            call(
+                &w,
+                "save_set",
+                serde_json::json!({ "root": root_s, "name": "Field" }),
+            )
+            .unwrap(),
+        );
+        assert!(saved.as_str().unwrap().ends_with("Field"));
+        let sets = json(call(&w, "list_sets", serde_json::json!({})).unwrap());
+        assert_eq!(sets[0]["name"], "Field");
+        assert_eq!(sets[0]["reels"], serde_json::json!([0]));
+        assert_eq!(sets[0]["names"], serde_json::json!(["Harbour"]));
+        assert_eq!(sets[0]["hasOptions"], false);
+
+        let imported = json(
+            call(
+                &w,
+                "import_pack",
+                serde_json::json!({ "from": pack.display().to_string() }),
+            )
+            .unwrap(),
+        );
+        assert_eq!(imported["placed"][0]["fileName"], "mg1.wav");
+        assert_eq!(imported["placed"][0]["source"], "Gulls.wav");
+        assert_eq!(imported["skipped"], serde_json::json!([]));
+
+        // Loading a set is a restore from its folder.
+        call(
+            &w,
+            "restore_card",
+            serde_json::json!({ "root": root_s, "from": imported["dir"] }),
+        )
+        .unwrap();
+        let slots = json(call(&w, "list_slots", serde_json::json!({ "root": root_s })).unwrap());
+        assert_eq!(slots[0]["name"], "Gulls");
+        for dir in [&root, &pack, &test_sets_root()] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

@@ -81,6 +81,27 @@ export const backupsFolder = (root: string) => invoke<string>("backups_folder", 
 export const backupCard = (root: string) => invoke<string>("backup_card", { root });
 export const restoreCard = (root: string, from: string) =>
   invoke<void>("restore_card", { root, from });
+export type CardSet = {
+  name: string;
+  dir: string;
+  reels: number[];
+  names: string[];
+  hasOptions: boolean;
+  /** Milliseconds since 1970. */
+  modified: number;
+};
+
+export type PackImport = {
+  name: string;
+  dir: string;
+  placed: { fileName: string; source: string; problems: string[] }[];
+  skipped: { source: string; reason: string }[];
+};
+
+export const listSets = () => invoke<CardSet[]>("list_sets");
+export const setsFolder = () => invoke<string>("sets_folder");
+export const saveSet = (root: string, name: string) => invoke<string>("save_set", { root, name });
+export const importPack = (from: string) => invoke<PackImport>("import_pack", { from });
 export const checkCard = (root: string) => invoke<CardCheck>("check_card", { root });
 export const removeClutter = (root: string) => invoke<number>("remove_clutter", { root });
 export const convertSlot = (root: string, index: number) => invoke<void>("convert_slot", { root, index });
