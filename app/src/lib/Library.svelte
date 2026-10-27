@@ -13,8 +13,8 @@
     errorText,
     formatTime,
     listBackups,
-    loadReel,
     moveSlot,
+    previewReel,
     removeClutter,
     removeNames,
     restoreCard,
@@ -87,6 +87,8 @@
     stopPlaying();
     busy = true;
     try {
+      // A queued name save names a slot, so it lands before reels move.
+      await labelSaves;
       await action();
       await onchanged();
       notify(done);
@@ -233,7 +235,7 @@
     const run = playRun;
     playing = slot.index;
     try {
-      const reel = await loadReel(root, slot.index);
+      const reel = await previewReel(root, slot.index);
       if (run !== playRun) return;
       const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
       const buffer = ctx.createBuffer(2, Math.max(1, reel.left.length), SAMPLE_RATE);
@@ -476,6 +478,7 @@
             class="label"
             value={slot.name}
             placeholder="Name"
+            aria-label="Name of {slot.fileName}"
             maxlength="80"
             disabled={busy}
             onchange={(e) => saveLabel(slot, "name", e.currentTarget)}
@@ -485,6 +488,7 @@
             class="label note"
             value={slot.note}
             placeholder="Note"
+            aria-label="Note for {slot.fileName}"
             maxlength="300"
             disabled={busy}
             onchange={(e) => saveLabel(slot, "note", e.currentTarget)}
