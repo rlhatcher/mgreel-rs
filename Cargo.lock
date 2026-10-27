@@ -2167,7 +2167,9 @@ name = "mgreel-core"
 version = "1.1.0"
 dependencies = [
  "anyhow",
+ "flate2",
  "hound",
+ "quick-xml",
  "rubato",
  "serde",
  "serde_json",

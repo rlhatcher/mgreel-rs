@@ -45,7 +45,8 @@ export type CardSnapshot = { root: string; label: string; files: string[]; error
 
 export type LoadedReel = { markers: number[]; audioId: string; left: Float32Array; right: Float32Array };
 
-export type Source = { path: string; name: string; frames: number; error: string | null };
+/** `markers` are the file's cue points and region ends, at 48 kHz. */
+export type Source = { path: string; name: string; frames: number; markers: number[]; error: string | null };
 
 export type SourceSpec = { path: string; start: number | null; end: number | null };
 
@@ -161,7 +162,8 @@ export type EditOp =
   | { kind: "smoothLoop"; ms: number }
   | { kind: "removeDc" }
   | { kind: "highPass"; hz: number }
-  | { kind: "speed"; semitones: number };
+  | { kind: "speed"; semitones: number }
+  | { kind: "trimStart"; db: number };
 
 /** At `start`, drop `removed` frames and put these samples in. */
 export type Span = { start: number; removed: number; left: Float32Array; right: Float32Array };
@@ -229,6 +231,15 @@ export const editReel = async (
   last: number,
   op: EditOp,
 ) => parseEdit(await invoke<ArrayBuffer>("edit_reel", { root, index, markers, first, last, op }));
+/** The splices whose samples all stay below `db` dBFS. */
+export const silentSplices = (root: string, index: number, markers: number[], db: number) =>
+  invoke<number[]>("silent_splices", { root, index, markers, db });
+/** Delete splices that need not sit together, as one edit. */
+export const deleteSplices = async (root: string, index: number, markers: number[], splices: number[]) =>
+  parseEdit(await invoke<ArrayBuffer>("delete_splices", { root, index, markers, splices }));
+/** Markers with splices shorter than `minMs` joined to a neighbour, keeping locked markers. */
+export const mergeShortSplices = (markers: number[], frames: number, minMs: number, locked: number[]) =>
+  invoke<number[]>("merge_short_splices", { markers, frames, minMs, locked });
 export const copySplices = (root: string, index: number, markers: number[], first: number, last: number) =>
   invoke<number>("copy_splices", { root, index, markers, first, last });
 export const pasteSplices = async (root: string, index: number, markers: number[], at: number) =>
@@ -265,13 +276,19 @@ export const autoSlice = (
   maxMarkers: number,
   keep: number[],
 ) => invoke<number[]>("auto_slice", { root, index, mode, minSeconds, maxSeconds, maxMarkers, keep });
+/** File types that markers can be read from. */
+export const MARKER_FILE_EXTENSIONS = ["txt", "csv", "als", "wav", "wave"];
+export type MarkerFile = { markers: number[]; outside: number; warnings: string[] };
+export const readMarkerFile = (path: string, offset: number, frames: number) =>
+  invoke<MarkerFile>("read_marker_file", { path, offset, frames });
 export const probeSources = (paths: string[]) => invoke<Source[]>("probe_sources", { paths });
 export const buildReel = (
   sources: SourceSpec[],
   normalize: boolean,
   fadeMs: number,
+  keepMarkers: boolean,
   target: Target,
-) => invoke<BuildResult>("build_reel", { sources, normalize, fadeMs, target });
+) => invoke<BuildResult>("build_reel", { sources, normalize, fadeMs, keepMarkers, target });
 export const readOptions = (root: string) => invoke<Options>("read_options", { root });
 export const writeOptions = (root: string, changes: { key: string; value: string }[]) =>
   invoke<void>("write_options", { root, changes });

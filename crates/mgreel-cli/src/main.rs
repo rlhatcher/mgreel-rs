@@ -5,7 +5,9 @@
  * single Make Noise Morphagene reel (Wave file 32bit/48khz/stereo).
  *
  * All files are concatenated and splice markers are set at the end of each
- * input files. Mono Wave files are converted to stereo.
+ * input files. With --keep-markers, cue points and region ends saved in the
+ * input files become splice markers too. Mono Wave files are converted to
+ * stereo.
  *
  * Example:
  *      mgreel --out out.wav input1.wav input2.wav
@@ -26,6 +28,10 @@ struct Args {
     #[arg(short, long)]
     out: Option<PathBuf>,
 
+    /// Also keep the cue points and region ends saved in the input files
+    #[arg(long)]
+    keep_markers: bool,
+
     /// Input WAV files
     #[arg(required = true)]
     input_files: Vec<PathBuf>,
@@ -37,10 +43,21 @@ fn main() -> Result<()> {
     let clips = args
         .input_files
         .iter()
-        .map(|path| Clip::open(path).with_context(|| format!("Failed to process file: {:?}", path)))
+        .map(|path| {
+            let (clip, markers) = Clip::open_with_markers(path)
+                .with_context(|| format!("Failed to process file: {:?}", path))?;
+            Ok((
+                clip,
+                if args.keep_markers {
+                    markers
+                } else {
+                    Vec::new()
+                },
+            ))
+        })
         .collect::<Result<Vec<_>>>()?;
 
-    let reel = Reel::build(clips, BuildOptions::default());
+    let reel = Reel::build_marked(clips, BuildOptions::default());
     for problem in reel.problems() {
         eprintln!("warning: the Morphagene will not load this reel: {problem}");
     }

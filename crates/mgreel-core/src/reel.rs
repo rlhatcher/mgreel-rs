@@ -26,17 +26,26 @@ impl Clip {
     /// Read any PCM or float WAV, converting it to stereo at 48 kHz.
     /// Mono is copied to both channels; more than two channels is an error.
     pub fn open(path: &Path) -> Result<Clip> {
-        let bytes = std::fs::read(path)?;
-        let file = ReelFile::parse(&bytes)?;
+        Ok(Clip::open_with_markers(path)?.0)
+    }
+
+    /// [`Clip::open`], plus the file's splice points from
+    /// [`ReelFile::source_markers`] at 48 kHz.
+    pub fn open_with_markers(path: &Path) -> Result<(Clip, Vec<u32>)> {
+        let file = ReelFile::open(path)?;
         let format = file.format()?;
         let (left, right) = file.decode()?;
-        if format.sample_rate == SAMPLE_RATE {
-            return Ok(Clip { left, right });
-        }
-        Ok(Clip {
-            left: resample(&left, format.sample_rate, SAMPLE_RATE)?,
-            right: resample(&right, format.sample_rate, SAMPLE_RATE)?,
-        })
+        let markers = rescale_markers(&file.source_markers(), format.sample_rate);
+        let clip = if format.sample_rate == SAMPLE_RATE {
+            Clip { left, right }
+        } else {
+            Clip {
+                left: resample(&left, format.sample_rate, SAMPLE_RATE)?,
+                right: resample(&right, format.sample_rate, SAMPLE_RATE)?,
+            }
+        };
+        let markers = clean_markers(markers, clip.frames());
+        Ok((clip, markers))
     }
 
     pub fn frames(&self) -> u32 {
@@ -105,22 +114,34 @@ impl Reel {
     /// Join clips end to end with a marker at the start of each clip after
     /// the first.
     pub fn build(clips: Vec<Clip>, options: BuildOptions) -> Reel {
-        let total: usize = clips.iter().map(|c| c.left.len()).sum();
+        Reel::build_marked(
+            clips.into_iter().map(|c| (c, Vec::new())).collect(),
+            options,
+        )
+    }
+
+    /// [`Reel::build`], also keeping each clip's own markers, given as frame
+    /// offsets into the clip and moved to where the clip lands.
+    pub fn build_marked(clips: Vec<(Clip, Vec<u32>)>, options: BuildOptions) -> Reel {
+        let total: usize = clips.iter().map(|(c, _)| c.left.len()).sum();
         let mut reel = Reel {
             left: Vec::with_capacity(total),
             right: Vec::with_capacity(total),
             markers: Vec::new(),
         };
-        for mut clip in clips {
+        for (mut clip, markers) in clips {
             if let Some(peak) = options.normalize {
                 clip.normalize(peak);
             }
             if options.fade_frames > 0 {
                 clip.fade_edges(options.fade_frames);
             }
-            if !reel.left.is_empty() {
-                reel.markers.push(reel.frames());
+            let start = reel.frames();
+            if start > 0 {
+                reel.markers.push(start);
             }
+            let inside = clean_markers(markers, clip.frames());
+            reel.markers.extend(inside.into_iter().map(|m| start + m));
             reel.left.extend_from_slice(&clip.left);
             reel.right.extend_from_slice(&clip.right);
         }
@@ -142,14 +163,12 @@ impl Reel {
                 markers,
             });
         }
-        let ratio = SAMPLE_RATE as f64 / format.sample_rate as f64;
         let left = resample(&left, format.sample_rate, SAMPLE_RATE)?;
         let right = resample(&right, format.sample_rate, SAMPLE_RATE)?;
-        let markers = markers
-            .iter()
-            .map(|&m| (m as f64 * ratio).round() as u32)
-            .collect();
-        let markers = clean_markers(markers, left.len() as u32);
+        let markers = clean_markers(
+            rescale_markers(&markers, format.sample_rate),
+            left.len() as u32,
+        );
         Ok(Reel {
             left,
             right,
@@ -249,6 +268,28 @@ pub fn is_morphagene_format(format: &Format) -> bool {
         && format.bits_per_sample == 32
 }
 
+/// Markers at `rate` moved to the same times at 48 kHz.
+pub fn rescale_markers(markers: &[u32], rate: u32) -> Vec<u32> {
+    if rate == SAMPLE_RATE || rate == 0 {
+        return markers.to_vec();
+    }
+    let ratio = SAMPLE_RATE as f64 / rate as f64;
+    markers
+        .iter()
+        .map(|&m| (m as f64 * ratio).round().min(u32::MAX as f64) as u32)
+        .collect()
+}
+
+/// The markers that fall inside frames `start..end` of a clip, as offsets
+/// into that range, for a clip trimmed with [`Clip::trim`].
+pub fn trim_markers(markers: &[u32], start: u32, end: u32) -> Vec<u32> {
+    markers
+        .iter()
+        .filter(|&&m| m > start && m < end)
+        .map(|&m| m - start)
+        .collect()
+}
+
 /// Sort, de-duplicate and drop markers that can't start a splice.
 pub fn clean_markers(mut markers: Vec<u32>, frames: u32) -> Vec<u32> {
     markers.retain(|&m| m > 0 && m < frames);
@@ -318,6 +359,18 @@ impl ReelFile {
         self.chunk(b"cue ")
             .map(|c| riff::decode_cues(&c.data))
             .unwrap_or_default()
+    }
+
+    /// See [`riff::source_markers`]: cue points and `ltxt` region ends, at
+    /// the file's own rate.
+    pub fn source_markers(&self) -> Vec<u32> {
+        let lists: Vec<&[u8]> = self
+            .chunks
+            .iter()
+            .filter(|c| &c.id == b"LIST")
+            .map(|c| &c.data[..])
+            .collect();
+        riff::source_markers(self.chunk(b"cue ").map(|c| &c.data[..]), &lists)
     }
 
     /// Replace the `cue ` chunk. Labels in a `LIST`/`adtl` chunk point at
@@ -523,6 +576,59 @@ mod tests {
         };
         clip.normalize(1.0);
         assert_eq!(clip.left, vec![0.5, -1.0]);
+    }
+
+    #[test]
+    fn build_marked_moves_each_clips_markers_to_where_it_lands() {
+        let clip = |n: usize| Clip {
+            left: vec![0.1; n],
+            right: vec![0.1; n],
+        };
+        let reel = Reel::build_marked(
+            vec![(clip(100), vec![30]), (clip(50), vec![60, 0, 10])],
+            BuildOptions::default(),
+        );
+        // 0 and 60 can't start a splice inside a 50-frame clip.
+        assert_eq!(reel.markers, vec![30, 100, 110]);
+        assert_eq!(trim_markers(&[5, 20, 40, 90], 20, 90), vec![20]);
+    }
+
+    #[test]
+    fn open_with_markers_reads_cues_and_region_ends_at_48k() {
+        let spec = WavSpec {
+            channels: 1,
+            sample_rate: 24_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut bytes = Vec::new();
+        {
+            let mut w = WavWriter::new(std::io::Cursor::new(&mut bytes), spec).unwrap();
+            for _ in 0..24_000 {
+                w.write_sample(0i16).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let mut file = ReelFile::parse(&bytes).unwrap();
+        // A region from 0.25 s to 0.5 s, as RX writes one.
+        file.chunks.push(riff::encode_cues(&[6_000]));
+        let mut list = b"adtlltxt".to_vec();
+        list.extend_from_slice(&20u32.to_le_bytes());
+        list.extend_from_slice(&1u32.to_le_bytes());
+        list.extend_from_slice(&6_000u32.to_le_bytes());
+        list.extend_from_slice(&[0; 12]);
+        file.chunks.push(Chunk {
+            id: *b"LIST",
+            data: list,
+        });
+        let path = std::env::temp_dir().join(format!("mgreel-marked-{}.wav", std::process::id()));
+        std::fs::write(&path, file.to_bytes()).unwrap();
+        let (clip, markers) = Clip::open_with_markers(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(clip.frames(), 48_000);
+        assert_eq!(markers, vec![12_000, 24_000]);
+        // Reading it as a reel keeps only the cue point, as the module does.
+        assert_eq!(file.markers(), vec![6_000]);
     }
 
     #[test]

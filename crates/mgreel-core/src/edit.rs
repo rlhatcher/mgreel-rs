@@ -134,7 +134,14 @@ pub enum Op {
     /// Change speed like tape: pitch and length together. +12 is twice as
     /// fast, an octave up and half as long.
     SpeedSemitones(f32),
+    /// Cut the quiet start of each splice: everything before its first
+    /// sample at or above this level in dBFS, less 5 ms so the attack
+    /// stays. A splice that never gets that loud stays as it is.
+    TrimStartDb(f32),
 }
+
+/// What [`Op::TrimStartDb`] leaves before the first loud sample.
+const TRIM_LEAD_MS: f32 = 5.0;
 
 /// A reel's audio being edited, with its undo history.
 pub struct Session {
@@ -409,6 +416,46 @@ impl Session {
         Ok(self.replace(&bounds, lo, hi, joined, lengths))
     }
 
+    /// The splices whose samples all stay below `level_db` dBFS.
+    pub fn silent_splices(&self, markers: &[u32], level_db: f32) -> Vec<usize> {
+        let bounds = self.bounds(markers);
+        let threshold = db(level_db);
+        let quiet = |ch: &[f32]| ch.iter().all(|x| x.abs() < threshold);
+        (0..bounds.len() - 1)
+            .filter(|&i| {
+                let range = bounds[i]..bounds[i + 1];
+                quiet(&self.audio.left[range.clone()]) && quiet(&self.audio.right[range])
+            })
+            .collect()
+    }
+
+    /// Delete the given splices, which need not sit together, as one edit.
+    /// Returns the new markers.
+    pub fn delete_splices(&mut self, markers: &[u32], splices: &[usize]) -> Result<Vec<u32>> {
+        let bounds = self.bounds(markers);
+        let count = bounds.len() - 1;
+        let mut gone = splices.to_vec();
+        gone.sort_unstable();
+        gone.dedup();
+        if let Some(&i) = gone.iter().find(|&&i| i >= count) {
+            bail!("splice {} isn't in this reel", i + 1);
+        }
+        if gone.len() == count {
+            bail!("a reel needs at least one splice");
+        }
+        let (Some(&lo), Some(&hi)) = (gone.first(), gone.last()) else {
+            return Ok(markers.to_vec());
+        };
+        let mut kept = Stereo::default();
+        let mut lengths = Vec::new();
+        for i in (lo..=hi).filter(|i| gone.binary_search(i).is_err()) {
+            let splice = self.audio.slice(bounds[i]..bounds[i + 1]);
+            lengths.push(splice.len());
+            kept.extend(&splice);
+        }
+        Ok(self.replace(&bounds, lo, hi + 1, kept, lengths))
+    }
+
     /// Move to history position `target`, undoing or redoing edits. Returns
     /// the spans to apply, in order, to a copy of the audio.
     pub fn seek(&mut self, target: usize) -> Result<Vec<Span<'_>>> {
@@ -567,6 +614,17 @@ fn transform(s: &mut Stereo, op: Op) {
             }
         }
         Op::SmoothLoopMs(ms) => smooth_loop(s, frames_for_ms(ms)),
+        Op::TrimStartDb(level) => {
+            let threshold = db(level);
+            let loud =
+                (0..len).find(|&i| s.left[i].abs() >= threshold || s.right[i].abs() >= threshold);
+            if let Some(i) = loud {
+                let cut = i.saturating_sub(frames_for_ms(TRIM_LEAD_MS));
+                for ch in s.channels() {
+                    ch.drain(..cut);
+                }
+            }
+        }
         Op::RemoveDc => {
             for ch in s.channels() {
                 if ch.is_empty() {
@@ -663,6 +721,49 @@ fn shuffle(items: &mut [usize], seed: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn silent_splices_go_in_one_edit() {
+        // Loud, silent, loud, silent, loud: 100 frames each.
+        let mut left = Vec::new();
+        for level in [0.5, 0.0001, 0.5, 0.0, 0.5] {
+            left.extend(std::iter::repeat_n(level, 100));
+        }
+        let right = left.clone();
+        let mut s = Session::new(Stereo::new(left, right));
+        let markers = vec![100, 200, 300, 400];
+        let silent = s.silent_splices(&markers, -60.0);
+        assert_eq!(silent, vec![1, 3]);
+        let next = s.delete_splices(&markers, &silent).unwrap();
+        assert_eq!(next, vec![100, 200]);
+        assert_eq!(s.frames(), 300);
+        assert!(s.audio().left.iter().all(|&x| x == 0.5));
+        // One history step, so one undo brings both back.
+        assert_eq!(s.position(), 1);
+        s.seek(0).unwrap();
+        assert_eq!(s.frames(), 500);
+        // Nothing to delete changes nothing; deleting every splice is refused.
+        assert_eq!(s.delete_splices(&markers, &[]).unwrap(), markers);
+        assert_eq!(s.position(), 0);
+        assert!(s.delete_splices(&markers, &[0, 1, 2, 3, 4]).is_err());
+        assert!(s.delete_splices(&markers, &[5]).is_err());
+    }
+
+    #[test]
+    fn trim_start_keeps_a_lead_before_the_first_loud_sample() {
+        // 1000 silent frames, then sound; a second splice silent throughout.
+        let mut left = vec![0.0; 1000];
+        left.extend(std::iter::repeat_n(0.5, 500));
+        left.extend(std::iter::repeat_n(0.0, 300));
+        let right = left.clone();
+        let mut s = Session::new(Stereo::new(left, right));
+        let next = s.apply(&[1500], 0, 1, Op::TrimStartDb(-40.0)).unwrap();
+        // 5 ms at 48 kHz is 240 frames: 760 of the 1000 go.
+        assert_eq!(next, vec![740]);
+        assert_eq!(s.frames(), 1040);
+        assert_eq!(s.audio().left[239], 0.0);
+        assert_eq!(s.audio().left[240], 0.5);
+    }
 
     /// Splices of 100, 200 and 300 frames, each filled with its number.
     fn three() -> (Session, Vec<u32>) {

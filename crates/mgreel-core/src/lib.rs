@@ -8,6 +8,7 @@
 pub mod card;
 pub mod edit;
 pub mod history;
+pub mod marker_files;
 pub mod names;
 pub mod options;
 pub mod reel;

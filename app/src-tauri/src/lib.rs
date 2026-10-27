@@ -4,6 +4,7 @@
 use mgreel_core::card::{self, Card, CardIssue, SlotInfo};
 use mgreel_core::edit::{Clipboard, Op, Session, Span, Stereo};
 use mgreel_core::history::{self, BackupKind};
+use mgreel_core::marker_files;
 use mgreel_core::names::ReelLabel;
 use mgreel_core::options::{self, Kind, OptionsFile};
 use mgreel_core::reel::{self, Problem};
@@ -697,6 +698,7 @@ enum EditOp {
     RemoveDc,
     HighPass { hz: f32 },
     Speed { semitones: f32 },
+    TrimStart { db: f32 },
 }
 
 impl From<EditOp> for Op {
@@ -716,6 +718,7 @@ impl From<EditOp> for Op {
             EditOp::RemoveDc => Op::RemoveDc,
             EditOp::HighPass { hz } => Op::HighPassHz(hz),
             EditOp::Speed { semitones } => Op::SpeedSemitones(semitones),
+            EditOp::TrimStart { db } => Op::TrimStartDb(db),
         }
     }
 }
@@ -742,6 +745,50 @@ async fn edit_reel(
         };
         Ok(edit_result(Status::of(s), Some(&markers), &spans))
     })
+}
+
+/// The splices of the open reel whose samples all stay below `db` dBFS.
+#[tauri::command]
+async fn silent_splices(
+    editing: State<'_, Editing>,
+    root: String,
+    index: usize,
+    markers: Vec<u32>,
+    db: f32,
+) -> CmdResult<Vec<usize>> {
+    with_open(&editing, &root, index, |open| {
+        Ok(open.session.silent_splices(&markers, db))
+    })
+}
+
+/// Delete the given splices of the open reel as one edit.
+#[tauri::command]
+async fn delete_splices(
+    editing: State<'_, Editing>,
+    root: String,
+    index: usize,
+    markers: Vec<u32>,
+    splices: Vec<usize>,
+) -> CmdResult<Response> {
+    with_open(&editing, &root, index, |open| {
+        let s = &mut open.session;
+        let before = s.position();
+        let markers = s.delete_splices(&markers, &splices).map_err(err)?;
+        let spans: Vec<Span> = if s.position() != before {
+            s.last_span().into_iter().collect()
+        } else {
+            Vec::new()
+        };
+        Ok(edit_result(Status::of(s), Some(&markers), &spans))
+    })
+}
+
+/// Markers with splices shorter than `min_ms` joined to a neighbour, as far
+/// as locked markers allow.
+#[tauri::command]
+fn merge_short_splices(markers: Vec<u32>, frames: u32, min_ms: f32, locked: Vec<u32>) -> Vec<u32> {
+    let min = (min_ms.max(0.0) * reel::SAMPLE_RATE as f32 / 1000.0).round() as u32;
+    slice::merge_short(&markers, frames, min, &locked)
 }
 
 /// Copy splices `first..=last` of the open reel. Returns how many.
@@ -993,6 +1040,30 @@ enum SliceMode {
 
 /// Propose markers for the open reel, edits included. Nothing is written;
 /// the editor shows them as unsaved changes.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MarkerFileDto {
+    markers: Vec<u32>,
+    /// Markers in the file that fall before the reel's audio or after it.
+    outside: usize,
+    warnings: Vec<String>,
+}
+
+/// Read the markers in an Audacity label file, a REAPER marker export, an
+/// Ableton Live set or a WAV file, as markers on a reel `frames` long whose
+/// audio starts `offset` seconds into the file's timeline.
+#[tauri::command]
+async fn read_marker_file(path: String, offset: f64, frames: u32) -> CmdResult<MarkerFileDto> {
+    let times = marker_files::read(Path::new(&path)).map_err(err)?;
+    let offset = if offset.is_finite() { offset } else { 0.0 };
+    let (markers, outside) = marker_files::to_markers(&times.seconds, offset, frames);
+    Ok(MarkerFileDto {
+        markers,
+        outside,
+        warnings: times.warnings,
+    })
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn auto_slice(
@@ -1046,6 +1117,8 @@ struct SourceDto {
     name: String,
     /// Length once resampled to 48 kHz.
     frames: u32,
+    /// The file's cue points and region ends, at 48 kHz.
+    markers: Vec<u32>,
     error: Option<String>,
 }
 
@@ -1059,16 +1132,18 @@ async fn probe_sources(paths: Vec<String>) -> Vec<SourceDto> {
                 .file_name()
                 .map_or(path.clone(), |n| n.to_string_lossy().into_owned());
             match probe(Path::new(&path)) {
-                Ok(frames) => SourceDto {
+                Ok((frames, markers)) => SourceDto {
                     path,
                     name,
                     frames,
+                    markers,
                     error: None,
                 },
                 Err(e) => SourceDto {
                     path,
                     name,
                     frames: 0,
+                    markers: Vec::new(),
                     error: Some(format!("{e:#}")),
                 },
             }
@@ -1076,7 +1151,8 @@ async fn probe_sources(paths: Vec<String>) -> Vec<SourceDto> {
         .collect()
 }
 
-fn probe(path: &Path) -> anyhow::Result<u32> {
+/// A source's length and markers at 48 kHz, read without decoding it.
+fn probe(path: &Path) -> anyhow::Result<(u32, Vec<u32>)> {
     use anyhow::Context;
     let chunks = riff::scan_file(path)?;
     let find = |id: &[u8; 4]| chunks.iter().find(|c| &c.id == id);
@@ -1088,7 +1164,21 @@ fn probe(path: &Path) -> anyhow::Result<u32> {
         anyhow::bail!("{} channels; only mono and stereo work", format.channels);
     }
     let frames = find(b"data").map_or(0, |c| c.size as u64) / format.frame_bytes().max(1) as u64;
-    Ok((frames * reel::SAMPLE_RATE as u64 / format.sample_rate.max(1) as u64) as u32)
+    let frames = (frames * reel::SAMPLE_RATE as u64 / format.sample_rate.max(1) as u64) as u32;
+    let cue = find(b"cue ")
+        .map(|c| riff::read_chunk(path, c))
+        .transpose()?;
+    let lists = chunks
+        .iter()
+        .filter(|c| &c.id == b"LIST")
+        .map(|c| riff::read_chunk(path, c))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let lists: Vec<&[u8]> = lists.iter().map(Vec::as_slice).collect();
+    let markers = reel::rescale_markers(
+        &riff::source_markers(cue.as_deref(), &lists),
+        format.sample_rate,
+    );
+    Ok((frames, reel::clean_markers(markers, frames)))
 }
 
 #[derive(Deserialize)]
@@ -1121,6 +1211,7 @@ async fn build_reel(
     sources: Vec<SourceSpec>,
     normalize: bool,
     fade_ms: u32,
+    keep_markers: bool,
     target: Target,
 ) -> CmdResult<BuildResult> {
     if sources.is_empty() {
@@ -1128,13 +1219,18 @@ async fn build_reel(
     }
     let mut clips = Vec::new();
     for source in &sources {
-        let mut clip =
-            Clip::open(Path::new(&source.path)).map_err(|e| format!("{}: {e:#}", source.path))?;
-        if source.start.is_some() || source.end.is_some() {
-            let end = source.end.unwrap_or(clip.frames());
-            clip.trim(source.start.unwrap_or(0), end);
+        let (mut clip, mut markers) = Clip::open_with_markers(Path::new(&source.path))
+            .map_err(|e| format!("{}: {e:#}", source.path))?;
+        if !keep_markers {
+            markers.clear();
         }
-        clips.push(clip);
+        if source.start.is_some() || source.end.is_some() {
+            let start = source.start.unwrap_or(0);
+            let end = source.end.unwrap_or(clip.frames());
+            markers = reel::trim_markers(&markers, start, end);
+            clip.trim(start, end);
+        }
+        clips.push((clip, markers));
     }
     let options = BuildOptions {
         // -1 dBFS leaves a little headroom under full scale.
@@ -1143,7 +1239,7 @@ async fn build_reel(
         // can't overflow the frame count.
         fade_frames: fade_ms.min(500) * reel::SAMPLE_RATE / 1000,
     };
-    let reel = Reel::build(clips, options);
+    let reel = Reel::build_marked(clips, options);
     check_limits(reel.frames(), reel.markers.len())?;
     let bytes = reel.to_wav_bytes().map_err(err)?;
     let written_to = match target {
@@ -1318,6 +1414,10 @@ pub fn run() {
             sets_folder,
             save_set,
             import_pack,
+            read_marker_file,
+            silent_splices,
+            delete_splices,
+            merge_short_splices,
             check_card,
             remove_clutter,
             set_reel_name,
@@ -1395,6 +1495,10 @@ mod tests {
                 list_sets,
                 save_set,
                 import_pack,
+                read_marker_file,
+                silent_splices,
+                delete_splices,
+                merge_short_splices,
             ])
             .build(mock_context(noop_assets()))
             .unwrap();
@@ -1659,6 +1763,97 @@ mod tests {
         for dir in [&root, &pack, &test_sets_root()] {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn probe_reads_source_markers_at_48k() {
+        // One second at 24 kHz with cue points at 0.25 s and 0.5 s.
+        let source = Reel {
+            left: vec![0.1; 24_000],
+            right: vec![0.1; 24_000],
+            markers: vec![],
+        };
+        let mut file = ReelFile::parse(&source.to_wav_bytes().unwrap()).unwrap();
+        file.set_markers(&[6_000, 12_000]);
+        for c in file.chunks.iter_mut().filter(|c| &c.id == b"fmt ") {
+            // The same bytes, read as 24 kHz: sample and byte rate.
+            c.data[4..8].copy_from_slice(&24_000u32.to_le_bytes());
+            c.data[8..12].copy_from_slice(&(24_000u32 * 8).to_le_bytes());
+        }
+        let path = std::env::temp_dir().join(format!("mgreel-probe-{}.wav", std::process::id()));
+        std::fs::write(&path, file.to_bytes()).unwrap();
+        let probed = probe(&path).unwrap();
+        let opened = Clip::open_with_markers(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(probed, (48_000, vec![12_000, 24_000]));
+        // The builder counts what the build keeps.
+        assert_eq!(probed.1, opened.1);
+    }
+
+    #[test]
+    fn markers_in_and_tidy_through_ipc() {
+        let root = std::env::temp_dir().join(format!("mgreel-ipc-tidy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root_s = root.display().to_string();
+        // Loud, silent, loud: 0.1 s each.
+        let mut left = Vec::new();
+        for v in [0.5f32, 0.0, 0.5] {
+            left.extend(std::iter::repeat_n(v, 4800));
+        }
+        let reel = Reel {
+            right: left.clone(),
+            left,
+            markers: vec![4800, 9600],
+        };
+        std::fs::write(root.join("mg1.wav"), reel.to_wav_bytes().unwrap()).unwrap();
+        let labels = root.join("labels.txt");
+        std::fs::write(&labels, "0.05\t0.05\tone\n0.5\t0.5\tpast the end\n").unwrap();
+        let (_app, w) = window();
+
+        let file = json(
+            call(
+                &w,
+                "read_marker_file",
+                serde_json::json!({ "path": labels.display().to_string(), "offset": 0.0, "frames": 14400 }),
+            )
+            .unwrap(),
+        );
+        assert_eq!(file["markers"], serde_json::json!([2400]));
+        assert_eq!(file["outside"], 1);
+
+        let merged = json(
+            call(
+                &w,
+                "merge_short_splices",
+                serde_json::json!({ "markers": [2400, 4800, 9600], "frames": 14400, "minMs": 60.0, "locked": [] }),
+            )
+            .unwrap(),
+        );
+        assert_eq!(merged, serde_json::json!([4800, 9600]));
+
+        let args = serde_json::json!({ "root": root_s, "index": 0 });
+        call(&w, "load_reel", args.clone()).unwrap();
+        let silent = json(
+            call(
+                &w,
+                "silent_splices",
+                serde_json::json!({ "root": root_s, "index": 0, "markers": [4800, 9600], "db": -60.0 }),
+            )
+            .unwrap(),
+        );
+        assert_eq!(silent, serde_json::json!([1]));
+        let reply = raw(call(
+            &w,
+            "delete_splices",
+            serde_json::json!({ "root": root_s, "index": 0, "markers": [4800, 9600], "splices": [1] }),
+        )
+        .unwrap());
+        let (pos, _, markers, spans) = decode(&reply);
+        assert_eq!(pos, 1);
+        assert_eq!(markers, Some(vec![4800]));
+        assert_eq!(spans.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
