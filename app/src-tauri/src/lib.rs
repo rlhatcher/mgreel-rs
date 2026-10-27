@@ -1,7 +1,8 @@
 //! Tauri commands over mgreel-core. Every command that changes the card
 //! backs up what it replaces into the app's data folder first.
 
-use mgreel_core::card::{self, Card, SlotInfo};
+use mgreel_core::card::{self, Card, CardIssue, SlotInfo};
+use mgreel_core::history::{self, BackupKind};
 use mgreel_core::options::{self, Kind, OptionsFile};
 use mgreel_core::reel::{self, Problem};
 use mgreel_core::riff::{self, Format};
@@ -11,6 +12,7 @@ use mgreel_core::{BuildOptions, Clip, Reel, ReelFile};
 use notify::{RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 use std::sync::Mutex;
 use tauri::ipc::Response;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
@@ -40,6 +42,8 @@ struct SlotDto {
     seconds: f64,
     markers: Vec<u32>,
     format_ok: bool,
+    /// Readable but not in Morphagene format, so Convert can fix it.
+    convertible: bool,
     problems: Vec<String>,
 }
 
@@ -52,6 +56,7 @@ impl From<SlotInfo> for SlotDto {
             frames: s.frames,
             seconds: s.seconds(),
             format_ok: s.format.is_some_and(|f| reel::is_morphagene_format(&f)),
+            convertible: s.format.is_some_and(|f| !reel::is_morphagene_format(&f)),
             markers: s.markers,
             problems: s.problems.iter().map(Problem::to_string).collect(),
         }
@@ -73,8 +78,10 @@ fn check_slot(index: usize) -> CmdResult<()> {
 // Library
 
 #[tauri::command]
-async fn list_cards() -> Vec<CardDto> {
-    Card::detect(Path::new(VOLUMES))
+async fn list_cards(app: AppHandle) -> Vec<CardDto> {
+    let cards = Card::detect(Path::new(VOLUMES));
+    snapshot_new_cards(&app, &cards);
+    cards
         .into_iter()
         .map(|c| CardDto {
             root: c.root.display().to_string(),
@@ -131,8 +138,251 @@ async fn backup_card(app: AppHandle, root: String) -> CmdResult<String> {
 #[tauri::command]
 async fn restore_card(app: AppHandle, root: String, from: String) -> CmdResult<()> {
     let card = Card::new(root);
-    card.restore(Path::new(&from), &backup_dir(&app, &card)?)
-        .map_err(err)
+    let dir = backup_dir(&app, &card)?;
+    card.restore(Path::new(&from), &dir).map_err(err)?;
+    let state = app.state::<Snapshots>();
+    let _guard = state.lock.lock().map_err(err)?;
+    history::remember_card(&card, &dir).map_err(err)
+}
+
+// Card safety
+
+/// Cards whose reels were checked for changes since this mount, and a lock
+/// around the list of reel hashes the app has seen.
+#[derive(Default)]
+struct Snapshots {
+    handled: Mutex<HashSet<String>>,
+    lock: Mutex<()>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotDto {
+    root: String,
+    label: String,
+    files: Vec<String>,
+    error: Option<String>,
+}
+
+/// Copy, in the background, the reels each newly mounted card holds that
+/// the app hasn't seen, such as ones recorded on the module, before the app
+/// changes anything. Emits `card-snapshot` when it copied something or
+/// failed.
+fn snapshot_new_cards(app: &AppHandle, cards: &[Card]) {
+    let state = app.state::<Snapshots>();
+    let Ok(mut handled) = state.handled.lock() else {
+        return;
+    };
+    let roots: HashSet<String> = cards.iter().map(|c| c.root.display().to_string()).collect();
+    // A card that was removed gets checked again when it comes back.
+    handled.retain(|r| roots.contains(r));
+    for card in cards {
+        let root = card.root.display().to_string();
+        if !handled.insert(root.clone()) {
+            continue;
+        }
+        let (app, card) = (app.clone(), card.clone());
+        std::thread::spawn(move || {
+            let result = backup_dir(&app, &card).and_then(|dir| {
+                let state = app.state::<Snapshots>();
+                let _guard = state.lock.lock().map_err(err)?;
+                history::snapshot(&card, &dir).map_err(err)
+            });
+            let dto = match result {
+                Ok(None) => return,
+                Ok(Some((_, files))) => SnapshotDto {
+                    root,
+                    label: card.label(),
+                    files,
+                    error: None,
+                },
+                Err(e) => SnapshotDto {
+                    root,
+                    label: card.label(),
+                    files: Vec::new(),
+                    error: Some(e),
+                },
+            };
+            let _ = app.emit("card-snapshot", dto);
+        });
+    }
+}
+
+/// Note a reel the app wrote, so the next mount doesn't copy it as a change
+/// made on the module. A failure here only costs a spare copy later.
+fn remember<R: Runtime>(app: &AppHandle<R>, card: &Card, bytes: &[u8]) {
+    let Ok(dir) = backup_dir(app, card) else {
+        return;
+    };
+    let state = app.try_state::<Snapshots>();
+    let _guard = state.as_ref().map(|s| s.lock.lock());
+    if let Err(e) = history::remember(&dir, bytes) {
+        eprintln!("not noting {}: {e:#}", card.label());
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StrayDto {
+    path: String,
+    /// The path from the card root.
+    name: String,
+    wav: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CardCheckDto {
+    /// The file system, when it isn't the FAT32 the module needs.
+    wrong_filesystem: Option<String>,
+    stray: Vec<StrayDto>,
+    clutter: usize,
+}
+
+/// The volume's file system as `diskutil` names it, such as "MS-DOS
+/// (FAT32)". None for a folder that isn't a mounted volume.
+fn filesystem(root: &Path) -> Option<String> {
+    if root.parent() != Some(Path::new(VOLUMES)) {
+        return None;
+    }
+    let out = std::process::Command::new("diskutil")
+        .args(["info", "-plist"])
+        .arg(root)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let after = text.split("<key>FilesystemUserVisibleName</key>").nth(1)?;
+    let value = after.split("<string>").nth(1)?.split("</string>").next()?;
+    Some(value.trim().to_string())
+}
+
+#[tauri::command]
+async fn check_card(root: String) -> CardCheckDto {
+    let card = Card::new(&root);
+    let mut stray = Vec::new();
+    let mut clutter = 0;
+    for issue in card.issues() {
+        match issue {
+            CardIssue::Stray { path, wav } => stray.push(StrayDto {
+                name: path
+                    .strip_prefix(&card.root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string(),
+                path: path.display().to_string(),
+                wav,
+            }),
+            CardIssue::Clutter { paths } => clutter += paths.len(),
+        }
+    }
+    CardCheckDto {
+        wrong_filesystem: filesystem(&card.root).filter(|fs| !fs.contains("FAT32")),
+        stray,
+        clutter,
+    }
+}
+
+#[tauri::command]
+async fn remove_clutter(root: String) -> CmdResult<usize> {
+    Card::new(root).remove_clutter().map_err(err)
+}
+
+#[tauri::command]
+async fn convert_slot(app: AppHandle, root: String, index: usize) -> CmdResult<()> {
+    check_slot(index)?;
+    let card = Card::new(root);
+    let bytes = card
+        .convert_slot(index, &backup_dir(&app, &card)?)
+        .map_err(err)?;
+    remember(&app, &card, &bytes);
+    Ok(())
+}
+
+#[tauri::command]
+async fn adopt_file<R: Runtime>(app: AppHandle<R>, root: String, path: String, index: usize) -> CmdResult<()> {
+    check_slot(index)?;
+    let card = Card::new(root);
+    let bytes = card
+        .adopt(Path::new(&path), index, &backup_dir(&app, &card)?)
+        .map_err(err)?;
+    remember(&app, &card, &bytes);
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupDto {
+    dir: String,
+    kind: &'static str,
+    files: Vec<String>,
+    /// Milliseconds since 1970.
+    created: u64,
+}
+
+#[tauri::command]
+async fn list_backups<R: Runtime>(app: AppHandle<R>, root: String) -> CmdResult<Vec<BackupDto>> {
+    let dir = backup_dir(&app, &Card::new(root))?;
+    Ok(history::list(&dir)
+        .into_iter()
+        .map(|b| BackupDto {
+            dir: b.dir.display().to_string(),
+            kind: match b.kind {
+                BackupKind::BeforeChange => "beforeChange",
+                BackupKind::WholeCard => "wholeCard",
+                BackupKind::FromCard => "fromCard",
+            },
+            files: b.files,
+            created: b
+                .created
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64),
+        })
+        .collect())
+}
+
+/// Put one file from this card's backups back on the card.
+#[tauri::command]
+async fn restore_file<R: Runtime>(app: AppHandle<R>, root: String, dir: String, file: String) -> CmdResult<()> {
+    let card = Card::new(root);
+    let backups = backup_dir(&app, &card)?;
+    let from = Path::new(&dir).join(&file);
+    let inside = std::fs::canonicalize(&from)
+        .ok()
+        .zip(std::fs::canonicalize(&backups).ok())
+        .is_some_and(|(f, b)| f.starts_with(b));
+    if !inside || file.contains('/') {
+        return Err(format!("{} isn't in this card's backups", from.display()));
+    }
+    let bytes = card.restore_file(&from, &backups).map_err(err)?;
+    if card::slot_index(&file).is_some() {
+        remember(&app, &card, &bytes);
+    }
+    Ok(())
+}
+
+/// Unmount the card so it can be pulled out safely.
+#[tauri::command]
+async fn eject_card(root: String) -> CmdResult<()> {
+    let root = PathBuf::from(root);
+    if root.parent() != Some(Path::new(VOLUMES)) {
+        return Err(format!("{} isn't a card", root.display()));
+    }
+    let out = std::process::Command::new("diskutil")
+        .arg("eject")
+        .arg(&root)
+        .output()
+        .map_err(err)?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let msg = String::from_utf8_lossy(&out.stderr);
+        let msg = if msg.trim().is_empty() {
+            String::from_utf8_lossy(&out.stdout)
+        } else {
+            msg
+        };
+        Err(format!("Couldn't eject: {}", msg.trim()))
+    }
 }
 
 // Reel editor
@@ -557,6 +807,7 @@ async fn save_reel<R: Runtime>(
         };
         card.write_slot(index, &bytes, &backup_dir(&app, &card)?)
             .map_err(err)?;
+        remember(&app, &card, &bytes);
         open.disk_id = file_id(&bytes);
         open.session.mark_saved();
         Ok(card.slots().swap_remove(index).into())
@@ -726,6 +977,7 @@ async fn build_reel(
             let card = Card::new(root);
             card.write_slot(index, &bytes, &backup_dir(&app, &card)?)
                 .map_err(err)?;
+            remember(&app, &card, &bytes);
             card.slot_path(index)
         }
         Target::File { path } => {
@@ -870,6 +1122,7 @@ pub fn run() {
             app.manage(VolumeWatcher(watcher));
             app.manage(Editing::default());
             app.manage(SpliceClipboard::default());
+            app.manage(Snapshots::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -881,6 +1134,13 @@ pub fn run() {
             backups_folder,
             backup_card,
             restore_card,
+            check_card,
+            remove_clutter,
+            convert_slot,
+            adopt_file,
+            list_backups,
+            restore_file,
+            eject_card,
             load_reel,
             save_reel,
             edit_reel,
@@ -926,6 +1186,10 @@ mod tests {
             put_file,
             export_splices,
                 save_reel,
+                check_card,
+                adopt_file,
+                list_backups,
+                restore_file,
             ])
             .build(mock_context(noop_assets()))
             .unwrap();
@@ -952,6 +1216,13 @@ mod tests {
                 invoke_key: INVOKE_KEY.to_string(),
             },
         )
+    }
+
+    fn json(body: InvokeResponseBody) -> serde_json::Value {
+        match body {
+            InvokeResponseBody::Json(json) => serde_json::from_str(&json).unwrap(),
+            InvokeResponseBody::Raw(_) => panic!("expected JSON, got bytes"),
+        }
     }
 
     fn raw(body: InvokeResponseBody) -> Vec<u8> {
@@ -992,6 +1263,49 @@ mod tests {
         }
         assert_eq!(at, bytes.len(), "reply has trailing bytes");
         (pos, oldest, has.then_some(markers), spans)
+    }
+
+    #[test]
+    fn card_check_adopt_and_restore_through_ipc() {
+        let root = std::env::temp_dir().join(format!("mgreel-ipc-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("field")).unwrap();
+        let root_s = root.display().to_string();
+        let reel = |v: f32| {
+            Reel {
+                left: vec![v; 4800],
+                right: vec![v; 4800],
+                markers: vec![2400],
+            }
+            .to_wav_bytes()
+            .unwrap()
+        };
+        std::fs::write(root.join("mg1.wav"), reel(0.1)).unwrap();
+        std::fs::write(root.join("field/rain.wav"), reel(0.2)).unwrap();
+        std::fs::write(root.join("._mg1.wav"), b"junk").unwrap();
+        let (_app, w) = window();
+
+        let check = json(call(&w, "check_card", serde_json::json!({ "root": root_s })).unwrap());
+        assert_eq!(check["clutter"], 1);
+        assert_eq!(check["stray"][0]["name"], "field/rain.wav");
+        assert_eq!(check["wrongFilesystem"], serde_json::Value::Null);
+
+        let stray = check["stray"][0]["path"].as_str().unwrap();
+        call(&w, "adopt_file", serde_json::json!({ "root": root_s, "path": stray, "index": 1 })).unwrap();
+        assert_eq!(std::fs::read(root.join("mg2.wav")).unwrap(), reel(0.2));
+        assert!(!root.join("field/rain.wav").exists());
+
+        // The adopted file's backup can go back on the card, but nothing
+        // outside the backups folder can.
+        let backups = json(call(&w, "list_backups", serde_json::json!({ "root": root_s })).unwrap());
+        let dir = backups[0]["dir"].as_str().unwrap();
+        assert_eq!(backups[0]["kind"], "beforeChange");
+        assert_eq!(backups[0]["files"][0], "rain.wav");
+        let refused = call(&w, "restore_file", serde_json::json!({ "root": root_s, "dir": dir, "file": "../../../etc/hosts" }));
+        assert!(refused.is_err());
+        let refused = call(&w, "restore_file", serde_json::json!({ "root": root_s, "dir": root_s, "file": "mg1.wav" }));
+        assert!(refused.is_err(), "the card isn't a backup folder");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

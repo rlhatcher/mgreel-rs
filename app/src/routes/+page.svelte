@@ -7,7 +7,7 @@
   import Editor from "$lib/Editor.svelte";
   import Library from "$lib/Library.svelte";
   import OptionsEditor from "$lib/OptionsEditor.svelte";
-  import { errorText, listCards, listSlots, type Card, type Slot } from "$lib/api";
+  import { errorText, listCards, listSlots, type Card, type CardSnapshot, type Slot } from "$lib/api";
 
   type Tab = "library" | "editor" | "builder" | "options";
 
@@ -22,6 +22,8 @@
   /** The open card has gone from /Volumes. */
   let cardMissing = $state(false);
   let buildTarget = $state<number | null>(null);
+  /** The card the user just ejected, so its going isn't reported as a removal. */
+  let ejected: string | null = null;
   let status = $state({ text: "", error: false });
   let statusTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -53,7 +55,9 @@
 
   function dropMissingCard() {
     if (cardMissing) {
-      notify("The card was removed.", true);
+      if (root === ejected) notify(`Ejected ${root?.split("/").pop()}. You can take the card out.`);
+      else notify("The card was removed.", true);
+      ejected = null;
       cardMissing = false;
       root = null;
       editing = null;
@@ -127,8 +131,18 @@
   onMount(() => {
     refreshCards();
     const unlisten = listen("cards-changed", () => refreshCards());
+    const unlistenSnapshot = listen<CardSnapshot>("card-snapshot", ({ payload: s }) => {
+      if (s.error) {
+        notify(`Couldn't copy the reels on ${s.label} to the backups folder: ${s.error}`, true);
+      } else {
+        const n = s.files.length;
+        const names = s.files.map((f) => f.replace(".wav", "")).join(", ");
+        notify(`Kept a copy of ${n} reel${n === 1 ? "" : "s"} on ${s.label} the app hadn't seen yet (${names}). See History.`);
+      }
+    });
     return () => {
       unlisten.then((f) => f());
+      unlistenSnapshot.then((f) => f());
     };
   });
 </script>
@@ -180,7 +194,18 @@
         </div>
       </div>
     {:else if tab === "library" && root}
-      <Library {root} {slots} onedit={edit} onbuild={buildInto} onchanged={refreshSlots} {notify} />
+      <Library
+        {root}
+        {slots}
+        onedit={edit}
+        onbuild={buildInto}
+        onchanged={refreshSlots}
+        onejected={() => {
+          ejected = root;
+          refreshCards();
+        }}
+        {notify}
+      />
     {:else if tab === "editor" && root && editing !== null && slots[editing]}
       {#key `${root}:${editing}`}
         <Editor

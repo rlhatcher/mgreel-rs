@@ -7,6 +7,7 @@
 
 pub mod card;
 pub mod edit;
+pub mod history;
 pub mod options;
 pub mod reel;
 pub mod riff;

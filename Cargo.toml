@@ -16,6 +16,7 @@ repository = "https://github.com/rlhatcher/mgreel-rs"
 anyhow = "1.0"
 hound = "3.5"
 rubato = "0.15"
+sha2 = "0.10"
 clap = { version = "4.5", features = ["derive"] }
 mgreel-core = { path = "crates/mgreel-core" }
 
