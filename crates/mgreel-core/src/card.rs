@@ -312,6 +312,29 @@ impl Card {
             }
             v
         };
+        // The new names are written before any reel moves, so a full card
+        // fails here with nothing changed. Renames need no free space.
+        let moved = names.reorder(order);
+        let names_tmp = if moved != names {
+            Some(stage(&self.names_path(), moved.to_json().as_bytes())?)
+        } else {
+            None
+        };
+        let renamed = self.rename_into(order, &current);
+        match (renamed, names_tmp) {
+            (Ok(()), Some(tmp)) => fs::rename(&tmp, self.names_path())
+                .with_context(|| format!("replacing {}", self.names_path().display())),
+            (Ok(()), None) => Ok(()),
+            (Err(e), tmp) => {
+                if let Some(tmp) = tmp {
+                    let _ = fs::remove_file(tmp);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn rename_into(&self, order: &[usize], current: &[Option<PathBuf>]) -> Result<()> {
         let mut staged = Vec::new();
         for (dest, &src) in order.iter().enumerate() {
             if dest == src {
@@ -325,10 +348,6 @@ impl Card {
         }
         for (tmp, dest) in staged {
             fs::rename(&tmp, self.root.join(slot_file_name(dest)))?;
-        }
-        let moved = names.reorder(order);
-        if moved != names {
-            self.write_names(&moved)?;
         }
         Ok(())
     }
@@ -456,6 +475,13 @@ impl Card {
     /// Copy every reel, `options.txt` and the reel names into a new
     /// timestamped folder under `dest`, and return that folder.
     pub fn backup(&self, dest: &Path) -> Result<PathBuf> {
+        // Held so a move can't land between copying the reels and the names.
+        let _lock = names_lock();
+        self.backup_locked(dest)
+    }
+
+    /// [`Card::backup`], for a caller that already holds the names lock.
+    fn backup_locked(&self, dest: &Path) -> Result<PathBuf> {
         let dir = new_dir(&dest.join(format!("{}-{}", self.label(), timestamp())))?;
         for (_, path) in self.reel_files() {
             fs::copy(&path, dir.join(path.file_name().unwrap()))?;
@@ -478,7 +504,8 @@ impl Card {
         if !Card::looks_like_card(from) {
             bail!("{} holds no reels or options.txt", from.display());
         }
-        self.backup(backup_dir)?;
+        let _lock = names_lock();
+        self.backup_locked(backup_dir)?;
         for (_, path) in self.reel_files() {
             fs::remove_file(path)?;
         }
@@ -488,7 +515,6 @@ impl Card {
         if from.join(OPTIONS_FILE).is_file() {
             fs::copy(from.join(OPTIONS_FILE), self.options_path())?;
         }
-        let _lock = names_lock();
         match fs::read(from.join(NAMES_FILE)) {
             Ok(bytes) => {
                 write_atomic(&self.names_path(), &bytes).context("restoring the reel names")?
@@ -527,8 +553,19 @@ fn write_safely(target: &Path, bytes: &[u8], backup_dir: &Path) -> Result<()> {
 }
 
 /// Write `bytes` to a temporary file beside `target`, then rename it over.
-/// Each write gets its own temporary name, so two at once can't share one.
 fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = stage(target, bytes)?;
+    fs::rename(&tmp, target).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        anyhow::Error::from(e).context(format!("replacing {}", target.display()))
+    })
+}
+
+/// Write `bytes` to a temporary file beside `target` and return its path,
+/// so the caller can rename it into place. This is the step that needs free
+/// space. Each call gets its own temporary name, so two at once can't share
+/// one.
+fn stage(target: &Path, bytes: &[u8]) -> Result<PathBuf> {
     static NEXT: AtomicU32 = AtomicU32::new(0);
     let dir = target.parent().context("target has no parent folder")?;
     let tmp = dir.join(format!(
@@ -541,7 +578,6 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
         let mut file = fs::File::create(&tmp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        fs::rename(&tmp, target)?;
         Ok(())
     })();
     if let Err(e) = written {
@@ -553,7 +589,7 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
             bytes.len().div_ceil(1_000_000)
         )));
     }
-    Ok(())
+    Ok(tmp)
 }
 
 fn backup_file(path: &Path, backup_dir: &Path) -> Result<()> {

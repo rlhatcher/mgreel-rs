@@ -482,8 +482,27 @@ fn with_open<T>(
 /// u32 frames, then every left sample followed by every right sample as f32.
 #[tauri::command]
 async fn load_reel(editing: State<'_, Editing>, root: String, index: usize) -> CmdResult<Response> {
+    let (out, reel, disk_id) = read_reel(&root, index)?;
+    *editing.0.lock().map_err(err)? = Some(OpenReel {
+        root,
+        index,
+        session: Session::new(Stereo::new(reel.left, reel.right)),
+        disk_id,
+    });
+    Ok(Response::new(out))
+}
+
+/// A reel in the same layout as [`load_reel`], for playing it in the
+/// Library. Leaves the reel open in the editor alone.
+#[tauri::command]
+async fn preview_reel(root: String, index: usize) -> CmdResult<Response> {
+    Ok(Response::new(read_reel(&root, index)?.0))
+}
+
+/// The reel's bytes in [`load_reel`]'s layout, the reel, and its file id.
+fn read_reel(root: &str, index: usize) -> CmdResult<(Vec<u8>, Reel, u64)> {
     check_slot(index)?;
-    let bytes = std::fs::read(Card::new(&root).slot_path(index)).map_err(err)?;
+    let bytes = std::fs::read(Card::new(root).slot_path(index)).map_err(err)?;
     let file = ReelFile::parse(&bytes).map_err(err)?;
     let reel = Reel::from_file(&file).map_err(err)?;
     let disk_id = file_id(&bytes);
@@ -496,13 +515,7 @@ async fn load_reel(editing: State<'_, Editing>, root: String, index: usize) -> C
     for s in reel.left.iter().chain(&reel.right) {
         out.extend_from_slice(&s.to_le_bytes());
     }
-    *editing.0.lock().map_err(err)? = Some(OpenReel {
-        root,
-        index,
-        session: Session::new(Stereo::new(reel.left, reel.right)),
-        disk_id,
-    });
-    Ok(Response::new(out))
+    Ok((out, reel, disk_id))
 }
 
 /// Where the history stands after a command, for the editor.
@@ -1205,6 +1218,7 @@ pub fn run() {
             restore_file,
             eject_card,
             load_reel,
+            preview_reel,
             save_reel,
             edit_reel,
             copy_splices,
@@ -1243,6 +1257,7 @@ mod tests {
             .manage(SpliceClipboard::default())
             .invoke_handler(tauri::generate_handler![
                 load_reel,
+                preview_reel,
                 edit_reel,
                 copy_splices,
                 paste_splices,
@@ -1465,6 +1480,7 @@ mod tests {
             markers: vec![4800, 14400],
         };
         std::fs::write(card.slot_path(0), reel.to_wav_bytes().unwrap()).unwrap();
+        std::fs::write(card.slot_path(1), reel.to_wav_bytes().unwrap()).unwrap();
 
         let (app, w) = window();
         let args = |extra: serde_json::Value| {
@@ -1477,6 +1493,14 @@ mod tests {
 
         let loaded = raw(call(&w, "load_reel", args(serde_json::json!({}))).unwrap());
         assert_eq!(u32::from_le_bytes(loaded[0..4].try_into().unwrap()), 2);
+        // Playing another reel in the Library leaves this one open.
+        let preview = raw(call(
+            &w,
+            "preview_reel",
+            serde_json::json!({ "root": root_s, "index": 1 }),
+        )
+        .unwrap());
+        assert_eq!(preview, loaded);
 
         // Delete the middle splice.
         let reply = raw(call(

@@ -95,8 +95,17 @@ export const setReelName = (root: string, index: number, name: string, note: str
 /** Back up mgreel.json, then remove it. */
 export const removeNames = (root: string) => invoke<void>("remove_names", { root });
 
+/** Open a reel in the editor. */
 export async function loadReel(root: string, index: number): Promise<LoadedReel> {
-  const buffer = await invoke<ArrayBuffer>("load_reel", { root, index });
+  return parseReel(await invoke<ArrayBuffer>("load_reel", { root, index }));
+}
+
+/** Read a reel to play it, leaving the reel open in the editor alone. */
+export async function previewReel(root: string, index: number): Promise<LoadedReel> {
+  return parseReel(await invoke<ArrayBuffer>("preview_reel", { root, index }));
+}
+
+function parseReel(buffer: ArrayBuffer): LoadedReel {
   const view = new DataView(buffer);
   const count = view.getUint32(0, true);
   const audioId = view.getBigUint64(4, true).toString();
