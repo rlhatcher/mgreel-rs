@@ -42,6 +42,8 @@
       notify(errorText(e), true);
     }
     cardMissing = root !== null && !allCards.some((c) => c.root === root);
+    // Forget an ejected card once a different card is open.
+    if (ejected !== root) ejected = null;
     if (cardMissing && holdingEdits) {
       notify("The card was removed. Put it back to save your marker changes.", true);
     } else {
