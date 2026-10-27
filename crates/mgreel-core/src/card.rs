@@ -502,30 +502,66 @@ impl Card {
 
     /// Replace the card's reels, `options.txt` and reel names with those in
     /// a backup folder. A backup without names leaves the reels unnamed.
-    /// Reels on the card are backed up to `backup_dir` first.
+    /// Reels on the card are backed up to `backup_dir` first. If the restore
+    /// fails partway, the card's names file is removed, so no reel keeps a
+    /// name that belongs to another.
     pub fn restore(&self, from: &Path, backup_dir: &Path) -> Result<()> {
         if !Card::looks_like_card(from) {
             bail!("{} holds no reels or options.txt", from.display());
         }
+        // Read before anything on the card changes.
+        let names = match fs::read(from.join(NAMES_FILE)) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e).context("reading the backup's reel names"),
+        };
         let _lock = names_lock();
-        self.backup_locked(backup_dir)?;
+        // Staged while the old reels are still there, so a full card stops
+        // here with nothing changed. Putting it in place later is a rename.
+        let names_tmp = match names {
+            Some(bytes) => Some(stage(&self.names_path(), &bytes)?),
+            None => None,
+        };
+        let restored = self.backup_locked(backup_dir).and_then(|saved| {
+            self.replace_with_backup(from)
+                .and_then(|()| match &names_tmp {
+                    Some(tmp) => replace_with(tmp, &self.names_path()),
+                    None => self.write_names(&Names::default()),
+                })
+                .map_err(|e| {
+                    // Unnamed reels are better than reels with another's name.
+                    let names = match fs::remove_file(self.names_path()) {
+                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                            "its reel names may not match its reels"
+                        }
+                        _ => "its reel names were removed",
+                    };
+                    e.context(format!(
+                        "the card is only partly restored and {names}; what it held before is in {}",
+                        saved.display()
+                    ))
+                })
+        });
+        if restored.is_err() {
+            if let Some(tmp) = &names_tmp {
+                let _ = fs::remove_file(tmp);
+            }
+        }
+        restored
+    }
+
+    /// The reel and `options.txt` part of [`Card::restore`].
+    fn replace_with_backup(&self, from: &Path) -> Result<()> {
         for (_, path) in self.reel_files() {
-            fs::remove_file(path)?;
+            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
         }
         for (index, path) in Card::new(from).reel_files() {
-            fs::copy(&path, self.root.join(slot_file_name(index)))?;
+            fs::copy(&path, self.root.join(slot_file_name(index)))
+                .with_context(|| format!("copying {}", path.display()))?;
         }
         if from.join(OPTIONS_FILE).is_file() {
-            fs::copy(from.join(OPTIONS_FILE), self.options_path())?;
-        }
-        match fs::read(from.join(NAMES_FILE)) {
-            Ok(bytes) => {
-                write_atomic(&self.names_path(), &bytes).context("restoring the reel names")?
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                self.write_names(&Names::default())?
-            }
-            Err(e) => return Err(e).context("restoring the reel names"),
+            fs::copy(from.join(OPTIONS_FILE), self.options_path())
+                .context("copying options.txt")?;
         }
         Ok(())
     }

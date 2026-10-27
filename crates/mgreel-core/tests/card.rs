@@ -441,6 +441,54 @@ fn backups_keep_names() {
     assert!(!root.join(NAMES_FILE).exists());
 }
 
+#[test]
+fn unreadable_backup_names_stop_a_restore() {
+    let root = tempdir();
+    let backups = tempdir();
+    let card = make_card(&root, &[(0, 10)]);
+    card.set_name(0, named("Harbour")).unwrap();
+    let saved = tempdir();
+    fs::write(saved.join("mg2.wav"), reel_bytes(30)).unwrap();
+    // A folder in place of the names file can't be read.
+    fs::create_dir(saved.join(NAMES_FILE)).unwrap();
+    assert!(card.restore(&saved, &backups).is_err());
+    assert_eq!(frames_by_slot(&card), vec![(0, 20)]);
+    assert_eq!(name_of(&card, 0), "Harbour");
+}
+
+#[test]
+fn a_failed_restore_leaves_no_names_on_the_wrong_reels() {
+    let root = tempdir();
+    let backups = tempdir();
+    let card = make_card(&root, &[(0, 10), (1, 20)]);
+    card.set_name(0, named("Harbour")).unwrap();
+    let saved = tempdir();
+    fs::write(saved.join("mg1.wav"), reel_bytes(30)).unwrap();
+    // A folder named like a reel can't be copied, so the restore stops
+    // after the card's reels are gone.
+    fs::create_dir(saved.join("mg2.wav")).unwrap();
+    let mut names = mgreel_core::names::Names::default();
+    names.set(0, named("From the backup"));
+    fs::write(saved.join(NAMES_FILE), names.to_json()).unwrap();
+
+    let e = format!("{:#}", card.restore(&saved, &backups).unwrap_err());
+    assert!(e.contains("partly restored"), "{e}");
+    assert!(!root.join(NAMES_FILE).exists());
+    // Only the copied reel is on the card, and no temporary files are.
+    let left: Vec<_> = fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(left, vec!["mg1.wav"]);
+    // The card as it was is in the backup the error names.
+    let before = history::list(&backups)
+        .into_iter()
+        .find(|b| b.kind == BackupKind::WholeCard)
+        .unwrap();
+    assert!(e.contains(&before.dir.display().to_string()), "{e}");
+    assert!(before.files.contains(&NAMES_FILE.to_string()));
+}
+
 fn walk(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for e in fs::read_dir(dir).unwrap().flatten() {
