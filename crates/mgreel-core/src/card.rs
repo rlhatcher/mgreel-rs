@@ -7,11 +7,22 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const SLOT_COUNT: usize = 32;
 pub const OPTIONS_FILE: &str = "options.txt";
 const TEMP_PREFIX: &str = ".mgreel-tmp-";
+
+/// Held while a change reads `mgreel.json` and writes it back, so two
+/// changes at once can't each drop the other's edit.
+static NAMES_LOCK: Mutex<()> = Mutex::new(());
+
+fn names_lock() -> MutexGuard<'static, ()> {
+    // A panic while holding the lock leaves nothing half done in memory.
+    NAMES_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// `mg1.wav` to `mg9.wav`, then `mga.wav` to `mgw.wav`.
 pub fn slot_file_name(index: usize) -> String {
@@ -128,6 +139,7 @@ impl Card {
 
     /// Name a reel and add a note to it. Empty strings clear them.
     pub fn set_name(&self, index: usize, label: ReelLabel) -> Result<()> {
+        let _lock = names_lock();
         let mut names = self.names()?;
         names.set(index, label);
         self.write_names(&names)
@@ -136,6 +148,7 @@ impl Card {
     /// Back up `mgreel.json`, then remove it, so a file that can't be read
     /// stops blocking changes to the card.
     pub fn remove_names(&self, backup_dir: &Path) -> Result<()> {
+        let _lock = names_lock();
         let path = self.names_path();
         if path.exists() {
             backup_file(&path, backup_dir)?;
@@ -162,6 +175,7 @@ impl Card {
     /// Before a reel goes into an empty slot, drop any name left there by a
     /// reel deleted outside the app, so the new reel doesn't take it.
     fn forget_if_empty(&self, index: usize) -> Result<()> {
+        let _lock = names_lock();
         if self.slot_path(index).exists() {
             return Ok(());
         }
@@ -246,6 +260,7 @@ impl Card {
 
     /// Back up then delete a slot's reel, and its name.
     pub fn clear_slot(&self, index: usize, backup_dir: &Path) -> Result<()> {
+        let _lock = names_lock();
         let mut names = self.names()?;
         let target = self.slot_path(index);
         if target.exists() {
@@ -286,7 +301,9 @@ impl Card {
         {
             bail!("slot order must list each of the {SLOT_COUNT} slots once");
         }
-        // Read first, so a names file that can't be read stops the move.
+        // Read first, so a names file that can't be read stops the move. The
+        // lock also keeps two moves from sharing temporary names.
+        let _lock = names_lock();
         let names = self.names()?;
         let current: Vec<Option<PathBuf>> = {
             let mut v = vec![None; SLOT_COUNT];
@@ -471,8 +488,11 @@ impl Card {
         if from.join(OPTIONS_FILE).is_file() {
             fs::copy(from.join(OPTIONS_FILE), self.options_path())?;
         }
-        match fs::copy(from.join(NAMES_FILE), self.names_path()) {
-            Ok(_) => {}
+        let _lock = names_lock();
+        match fs::read(from.join(NAMES_FILE)) {
+            Ok(bytes) => {
+                write_atomic(&self.names_path(), &bytes).context("restoring the reel names")?
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 self.write_names(&Names::default())?
             }
@@ -507,10 +527,14 @@ fn write_safely(target: &Path, bytes: &[u8], backup_dir: &Path) -> Result<()> {
 }
 
 /// Write `bytes` to a temporary file beside `target`, then rename it over.
+/// Each write gets its own temporary name, so two at once can't share one.
 fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
     let dir = target.parent().context("target has no parent folder")?;
     let tmp = dir.join(format!(
-        "{TEMP_PREFIX}{}",
+        "{TEMP_PREFIX}{}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
         target.file_name().unwrap().to_string_lossy()
     ));
     let written = (|| -> Result<()> {
