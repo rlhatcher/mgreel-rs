@@ -232,13 +232,14 @@
   // One reel plays at a time, from its start, like the module's Reel mode
   // preview.
   let playing = $state<number | null>(null);
-  let player: { ctx: AudioContext; source: AudioBufferSourceNode } | null = null;
+  /** The source is null while the reel loads. */
+  let player: { ctx: AudioContext; source: AudioBufferSourceNode | null } | null = null;
   /** Numbers each play, so a reel that finishes loading late doesn't start. */
   let playRun = 0;
 
   function stopPlaying() {
     playRun++;
-    player?.source.stop();
+    player?.source?.stop();
     player?.ctx.close();
     player = null;
     playing = null;
@@ -250,10 +251,15 @@
     if (again) return;
     const run = playRun;
     playing = slot.index;
+    // Made during the click: WebKit may keep a context made after a long
+    // load suspended, and the reel can take a while to load.
+    const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
+    if (ctx.state === "suspended") ctx.resume();
+    const mine: { ctx: AudioContext; source: AudioBufferSourceNode | null } = { ctx, source: null };
+    player = mine;
     try {
       const reel = await previewReel(root, slot.index);
       if (run !== playRun) return;
-      const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
       const buffer = ctx.createBuffer(2, Math.max(1, reel.left.length), SAMPLE_RATE);
       buffer.copyToChannel(reel.left as Float32Array<ArrayBuffer>, 0);
       buffer.copyToChannel(reel.right as Float32Array<ArrayBuffer>, 1);
@@ -264,10 +270,10 @@
         if (run === playRun) stopPlaying();
       };
       source.start();
-      player = { ctx, source };
+      mine.source = source;
     } catch (e) {
       if (run === playRun) {
-        playing = null;
+        stopPlaying();
         notify(errorText(e), true);
       }
     }
