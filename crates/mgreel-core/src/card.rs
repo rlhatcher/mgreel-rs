@@ -486,18 +486,32 @@ impl Card {
     /// [`Card::backup`], for a caller that already holds the names lock.
     fn backup_locked(&self, dest: &Path) -> Result<PathBuf> {
         let dir = new_dir(&dest.join(format!("{}-{}", self.label(), timestamp())))?;
+        self.copy_files(&dir)?;
+        Ok(dir)
+    }
+
+    /// Copy every reel, `options.txt` and the reel names into `dir`, which
+    /// must already exist.
+    pub(crate) fn copy_into(&self, dir: &Path) -> Result<()> {
+        // Held so a move can't land between copying the reels and the names.
+        let _lock = names_lock();
+        self.copy_files(dir)
+    }
+
+    fn copy_files(&self, dir: &Path) -> Result<()> {
         for (_, path) in self.reel_files() {
-            fs::copy(&path, dir.join(path.file_name().unwrap()))?;
+            fs::copy(&path, dir.join(path.file_name().unwrap()))
+                .with_context(|| format!("copying {}", path.display()))?;
         }
         for (path, name) in [
             (self.options_path(), OPTIONS_FILE),
             (self.names_path(), NAMES_FILE),
         ] {
             if path.is_file() {
-                fs::copy(&path, dir.join(name))?;
+                fs::copy(&path, dir.join(name)).with_context(|| format!("copying {name}"))?;
             }
         }
-        Ok(dir)
+        Ok(())
     }
 
     /// Replace the card's reels, `options.txt` and reel names with those in

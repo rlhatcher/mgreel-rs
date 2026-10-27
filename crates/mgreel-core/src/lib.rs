@@ -12,6 +12,7 @@ pub mod names;
 pub mod options;
 pub mod reel;
 pub mod riff;
+pub mod sets;
 pub mod slice;
 
 pub use card::{Card, SlotInfo};

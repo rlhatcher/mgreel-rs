@@ -38,6 +38,14 @@ Desktop app for a Make Noise Morphagene microSD card, built on
   - Undo and redo for all of it, and a spectrogram view.
 - Build: join WAV files into a new reel, with trims, normalize and fades.
 - options.txt: edit firmware options; only the values change.
+- Sets: whole cards kept in `~/Music/Morphagene Sets`, one folder per set
+  laid out like a card (reels, `options.txt`, `mgreel.json`). Save the open
+  card as a set, load a set onto a card (the card is backed up first), or
+  import a folder of WAV files such as a reel pack. Import converts each
+  file to 48 kHz 32-bit float stereo with its markers. Files named `mg1.wav`
+  to `mgw.wav` keep their slots; the rest fill the free slots in Finder's
+  name order, subfolders included, and each file name becomes the reel's
+  name. A folder with more than 32 WAV files is refused.
 
 Every change to the card copies the old file to
 `~/Library/Application Support/com.rlhatcher.mgreel/backups/` first. The

@@ -7,9 +7,10 @@
   import Editor from "$lib/Editor.svelte";
   import Library from "$lib/Library.svelte";
   import OptionsEditor from "$lib/OptionsEditor.svelte";
+  import Sets from "$lib/Sets.svelte";
   import { errorText, listCards, listSlots, type Card, type CardSnapshot, type Slot } from "$lib/api";
 
-  type Tab = "library" | "editor" | "builder" | "options";
+  type Tab = "library" | "editor" | "builder" | "options" | "sets";
 
   let cards = $state<Card[]>([]);
   /** A folder opened by hand, such as a copy of a card on disk. */
@@ -63,7 +64,8 @@
       cardMissing = false;
       root = null;
       editing = null;
-      tab = "library";
+      // Sets work without a card, so an import in progress keeps its tab.
+      if (tab !== "sets") tab = "library";
     }
     if (!root && allCards.length) root = allCards[0].root;
   }
@@ -120,14 +122,14 @@
     if (tab === "editor") tab = "library";
   }
 
-  /** Cmd-1 to Cmd-4 open the tabs in the order they appear. */
+  /** Cmd-1 to Cmd-5 open the tabs in the order they appear. */
   function onKey(e: KeyboardEvent) {
     if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
-    const order: Tab[] = ["library", "editor", "builder", "options"];
+    const order: Tab[] = ["library", "editor", "builder", "options", "sets"];
     const next = order[Number(e.key) - 1];
     if (!next) return;
     e.preventDefault();
-    if (next === "builder" || (root && (next !== "editor" || editing !== null))) go(next);
+    if (next === "builder" || next === "sets" || (root && (next !== "editor" || editing !== null))) go(next);
   }
 
   onMount(() => {
@@ -161,6 +163,7 @@
       </button>
       <button class:active={tab === "builder"} onclick={() => go("builder")}>Build</button>
       <button class:active={tab === "options"} onclick={() => go("options")} disabled={!root}>options.txt</button>
+      <button class:active={tab === "sets"} onclick={() => go("sets")}>Sets</button>
     </div>
     <div class="card">
       {#if allCards.length}
@@ -183,7 +186,7 @@
   </nav>
 
   <main>
-    {#if !root && tab !== "builder"}
+    {#if !root && tab !== "builder" && tab !== "sets"}
       <div class="empty">
         <h1>Insert the Morphagene's microSD card</h1>
         <p class="muted">
@@ -224,6 +227,8 @@
       {#key root}
         <OptionsEditor {root} {notify} />
       {/key}
+    {:else if tab === "sets"}
+      <Sets {root} onchanged={refreshSlots} {notify} />
     {/if}
   </main>
 
