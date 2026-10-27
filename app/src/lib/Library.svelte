@@ -51,12 +51,20 @@
   $effect(() => {
     const r = root;
     void slots;
-    checkCard(r)
+    recheck(r);
+  });
+
+  /** A check that fails clears the last result, so it can't look clean. */
+  function recheck(r: string) {
+    return checkCard(r)
       .then((c) => {
         if (r === root) check = c;
       })
-      .catch((e) => notify(errorText(e), true));
-  });
+      .catch((e) => {
+        if (r === root) check = null;
+        notify(errorText(e), true);
+      });
+  }
 
   async function run(action: () => Promise<unknown>, done: string) {
     busy = true;
@@ -135,7 +143,7 @@
       .catch((e) => notify(errorText(e), true))
       .finally(async () => {
         busy = false;
-        check = await checkCard(root).catch(() => check);
+        await recheck(root);
       });
   }
 

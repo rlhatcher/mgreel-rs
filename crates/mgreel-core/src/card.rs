@@ -242,28 +242,28 @@ impl Card {
 
     /// Audio files the module won't load, at the root or one folder down,
     /// and macOS metadata files. Hidden folders such as `.Trashes` are
-    /// skipped.
-    pub fn issues(&self) -> Vec<CardIssue> {
+    /// skipped. Fails if any folder it scans can't be read, so a partial
+    /// scan never looks like a clean card.
+    pub fn issues(&self) -> Result<Vec<CardIssue>> {
         let mut issues = Vec::new();
         let mut clutter = Vec::new();
         let mut dirs = vec![(self.root.clone(), 0)];
         while let Some((dir, depth)) = dirs.pop() {
-            let Ok(entries) = fs::read_dir(&dir) else {
-                continue;
-            };
-            let mut entries: Vec<_> = entries.flatten().collect();
+            let mut entries = fs::read_dir(&dir)
+                .and_then(|it| it.collect::<std::io::Result<Vec<_>>>())
+                .with_context(|| format!("reading {}", dir.display()))?;
             entries.sort_by_key(|e| e.file_name());
             for e in entries {
+                let path = e.path();
+                let kind = e
+                    .file_type()
+                    .with_context(|| format!("reading {}", path.display()))?;
                 // A link can lead off the card, so links are left alone.
-                let Ok(kind) = e.file_type() else {
-                    continue;
-                };
                 if kind.is_symlink() {
                     continue;
                 }
                 let name = e.file_name().to_string_lossy().into_owned();
-                let path = e.path();
-                if is_clutter(&name) {
+                if is_clutter(&name) && !kind.is_dir() {
                     clutter.push(path);
                 } else if name.starts_with('.') {
                     continue;
@@ -287,14 +287,14 @@ impl Card {
             clutter.sort();
             issues.push(CardIssue::Clutter { paths: clutter });
         }
-        issues
+        Ok(issues)
     }
 
     /// Delete the macOS metadata files [`Card::issues`] lists. Returns how
     /// many went.
     pub fn remove_clutter(&self) -> Result<usize> {
         let mut removed = 0;
-        for issue in self.issues() {
+        for issue in self.issues()? {
             if let CardIssue::Clutter { paths } = issue {
                 for path in paths {
                     fs::remove_file(&path)

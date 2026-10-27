@@ -172,7 +172,7 @@ fn lists_stray_audio_and_clutter() {
     fs::write(outside.join("song.wav"), b"x").unwrap();
     std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
 
-    let issues = card.issues();
+    let issues = card.issues().unwrap();
     let stray: Vec<(String, bool)> = issues
         .iter()
         .filter_map(|i| match i {
@@ -199,6 +199,7 @@ fn lists_stray_audio_and_clutter() {
     assert!(root.join("mg1.wav").exists());
     assert!(!card
         .issues()
+        .unwrap()
         .iter()
         .any(|i| matches!(i, CardIssue::Clutter { .. })));
 }
@@ -229,9 +230,15 @@ fn adopts_a_stray_file_into_a_slot() {
     write_cd_wav(&stray);
 
     assert!(card.adopt(&stray, 0, &backups).is_err(), "slot 0 is taken");
-    assert!(card
-        .adopt(&root.join("in/../../elsewhere.wav"), 1, &backups)
-        .is_err());
+    // A real file off the card, so the containment check is what refuses it.
+    let outside = tempdir().join("elsewhere.wav");
+    write_cd_wav(&outside);
+    assert!(
+        card.adopt(&outside, 1, &backups).is_err(),
+        "outside the card"
+    );
+    assert!(outside.exists());
+    assert!(card.slots()[1].path.is_none());
     card.adopt(&stray, 1, &backups).unwrap();
     assert!(!stray.exists());
     assert_eq!(card.slots()[1].markers, vec![24_000]);

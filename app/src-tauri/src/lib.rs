@@ -263,11 +263,11 @@ fn filesystem(root: &Path) -> Option<String> {
 }
 
 #[tauri::command]
-async fn check_card(root: String) -> CardCheckDto {
+async fn check_card(root: String) -> CmdResult<CardCheckDto> {
     let card = Card::new(&root);
     let mut stray = Vec::new();
     let mut clutter = 0;
-    for issue in card.issues() {
+    for issue in card.issues().map_err(err)? {
         match issue {
             CardIssue::Stray { path, wav } => stray.push(StrayDto {
                 name: path
@@ -281,11 +281,11 @@ async fn check_card(root: String) -> CardCheckDto {
             CardIssue::Clutter { paths } => clutter += paths.len(),
         }
     }
-    CardCheckDto {
+    Ok(CardCheckDto {
         wrong_filesystem: filesystem(&card.root).filter(|fs| !fs.contains("FAT32")),
         stray,
         clutter,
-    }
+    })
 }
 
 #[tauri::command]
