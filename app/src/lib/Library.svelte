@@ -54,14 +54,20 @@
     recheck(r);
   });
 
+  /** Numbers each check, so only the latest one shows its result. */
+  let checkRun = 0;
+
   /** A check that fails clears the last result, so it can't look clean. */
   function recheck(r: string) {
+    const run = ++checkRun;
+    const latest = () => run === checkRun && r === root;
     return checkCard(r)
       .then((c) => {
-        if (r === root) check = c;
+        if (latest()) check = c;
       })
       .catch((e) => {
-        if (r === root) check = null;
+        if (!latest()) return;
+        check = null;
         notify(errorText(e), true);
       });
   }
