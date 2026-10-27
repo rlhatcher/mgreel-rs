@@ -180,7 +180,9 @@ impl Session {
         if pos == self.base {
             return Some(self.base_state);
         }
-        self.history.get(pos.checked_sub(self.base + 1)?).map(|c| c.id)
+        self.history
+            .get(pos.checked_sub(self.base + 1)?)
+            .map(|c| c.id)
     }
 
     /// Record that the current audio is what the card holds.
@@ -281,13 +283,22 @@ impl Session {
     /// Sound On Sound. `sos` runs from 0 (only the new audio) to 1 (only
     /// what was there). Past the end of `audio` the splice is unchanged,
     /// and the splice keeps its length.
-    pub fn mix_splice(&mut self, markers: &[u32], i: usize, audio: &Stereo, sos: f32) -> Result<Vec<u32>> {
+    pub fn mix_splice(
+        &mut self,
+        markers: &[u32],
+        i: usize,
+        audio: &Stereo,
+        sos: f32,
+    ) -> Result<Vec<u32>> {
         let bounds = self.bounds(markers);
         check_selection(&bounds, i, i)?;
         let sos = sos.clamp(0.0, 1.0);
         let mut mixed = self.audio.slice(bounds[i]..bounds[i + 1]);
         let len = mixed.len();
-        for (old, new) in [(&mut mixed.left, &audio.left), (&mut mixed.right, &audio.right)] {
+        for (old, new) in [
+            (&mut mixed.left, &audio.left),
+            (&mut mixed.right, &audio.right),
+        ] {
             for (o, n) in old.iter_mut().zip(new) {
                 *o = *o * sos + n * (1.0 - sos);
             }
@@ -306,7 +317,13 @@ impl Session {
 
     /// Apply `op` to splices `first..=last`. Returns the new markers. An
     /// edit that changes nothing leaves the history alone.
-    pub fn apply(&mut self, markers: &[u32], first: usize, last: usize, op: Op) -> Result<Vec<u32>> {
+    pub fn apply(
+        &mut self,
+        markers: &[u32],
+        first: usize,
+        last: usize,
+        op: Op,
+    ) -> Result<Vec<u32>> {
         let bounds = self.bounds(markers);
         check_selection(&bounds, first, last)?;
         let count = bounds.len() - 1;
@@ -328,9 +345,17 @@ impl Session {
                     return Ok(markers.to_vec());
                 }
                 if to < first {
-                    (to, last + 1, selected().chain((to..first).map(splice)).collect())
+                    (
+                        to,
+                        last + 1,
+                        selected().chain((to..first).map(splice)).collect(),
+                    )
                 } else {
-                    (first, to, (last + 1..to).map(splice).chain(selected()).collect())
+                    (
+                        first,
+                        to,
+                        (last + 1..to).map(splice).chain(selected()).collect(),
+                    )
                 }
             }
             Op::Shuffle(seed) => {
@@ -496,9 +521,7 @@ fn check_selection(bounds: &[usize], first: usize, last: usize) -> Result<()> {
 /// Replace `removed` frames at `start` with `inserted`.
 fn replace(audio: &mut Stereo, start: usize, removed: usize, inserted: &Stereo) {
     let end = start + removed;
-    audio
-        .left
-        .splice(start..end, inserted.left.iter().copied());
+    audio.left.splice(start..end, inserted.left.iter().copied());
     audio
         .right
         .splice(start..end, inserted.right.iter().copied());
@@ -824,7 +847,10 @@ mod tests {
             .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
             .count();
         let expected = 2.0 * 2000.0 * 22_000.0 / 48_000.0;
-        assert!((crossings as f32 - expected).abs() < 4.0, "{crossings} vs {expected}");
+        assert!(
+            (crossings as f32 - expected).abs() < 4.0,
+            "{crossings} vs {expected}"
+        );
     }
 
     #[test]
