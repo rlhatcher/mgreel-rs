@@ -11,6 +11,7 @@ description = "Read, edit and write Make Noise Morphagene reels, SD cards and op
 anyhow.workspace = true
 hound.workspace = true
 rubato.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 hound.workspace = true

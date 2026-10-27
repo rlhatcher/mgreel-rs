@@ -17,8 +17,26 @@ export type Slot = {
   seconds: number;
   markers: number[];
   formatOk: boolean;
+  /** Readable but not in Morphagene format, so convertSlot can fix it. */
+  convertible: boolean;
   problems: string[];
 };
+
+export type CardCheck = {
+  /** The file system, when it isn't the FAT32 the module needs. */
+  wrongFilesystem: string | null;
+  /** Audio files the module won't load because of their name or folder. */
+  stray: { path: string; name: string; wav: boolean }[];
+  /** How many macOS metadata files are on the card. */
+  clutter: number;
+};
+
+export type BackupKind = "beforeChange" | "wholeCard" | "fromCard";
+
+export type Backup = { dir: string; kind: BackupKind; files: string[]; created: number };
+
+/** Sent when a mounted card held reels the app hadn't seen and it copied them. */
+export type CardSnapshot = { root: string; label: string; files: string[]; error: string | null };
 
 export type LoadedReel = { markers: number[]; audioId: string; left: Float32Array; right: Float32Array };
 
@@ -58,6 +76,15 @@ export const backupsFolder = (root: string) => invoke<string>("backups_folder", 
 export const backupCard = (root: string) => invoke<string>("backup_card", { root });
 export const restoreCard = (root: string, from: string) =>
   invoke<void>("restore_card", { root, from });
+export const checkCard = (root: string) => invoke<CardCheck>("check_card", { root });
+export const removeClutter = (root: string) => invoke<number>("remove_clutter", { root });
+export const convertSlot = (root: string, index: number) => invoke<void>("convert_slot", { root, index });
+export const adoptFile = (root: string, path: string, index: number) =>
+  invoke<void>("adopt_file", { root, path, index });
+export const listBackups = (root: string) => invoke<Backup[]>("list_backups", { root });
+export const restoreFile = (root: string, dir: string, file: string) =>
+  invoke<void>("restore_file", { root, dir, file });
+export const ejectCard = (root: string) => invoke<void>("eject_card", { root });
 
 export async function loadReel(root: string, index: number): Promise<LoadedReel> {
   const buffer = await invoke<ArrayBuffer>("load_reel", { root, index });

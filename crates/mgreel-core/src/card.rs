@@ -1,6 +1,6 @@
 //! The Morphagene microSD card: 32 reel slots and `options.txt` at the root.
 
-use crate::reel::{self, Problem};
+use crate::reel::{self, Problem, Reel};
 use crate::riff::{self, Format};
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -51,6 +51,23 @@ impl SlotInfo {
     }
 }
 
+/// Something on the card, outside the reel slots, that needs a look.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CardIssue {
+    /// An audio file the module won't load because of its name or folder.
+    /// Only WAV files can be put into a slot.
+    Stray { path: PathBuf, wav: bool },
+    /// macOS metadata files (`._*` and `.DS_Store`). The module doesn't use
+    /// them.
+    Clutter { paths: Vec<PathBuf> },
+}
+
+const AUDIO_EXTENSIONS: [&str; 7] = ["wav", "wave", "aif", "aiff", "flac", "mp3", "m4a"];
+
+fn is_clutter(name: &str) -> bool {
+    name.starts_with("._") || name == ".DS_Store"
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Card {
     pub root: PathBuf,
@@ -93,7 +110,7 @@ impl Card {
     }
 
     /// Reel files at the root by slot. Skips macOS `._` metadata files.
-    fn reel_files(&self) -> Vec<(usize, PathBuf)> {
+    pub(crate) fn reel_files(&self) -> Vec<(usize, PathBuf)> {
         let Ok(entries) = fs::read_dir(&self.root) else {
             return Vec::new();
         };
@@ -223,6 +240,112 @@ impl Card {
         Ok(())
     }
 
+    /// Audio files the module won't load, at the root or one folder down,
+    /// and macOS metadata files. Hidden folders such as `.Trashes` are
+    /// skipped.
+    pub fn issues(&self) -> Vec<CardIssue> {
+        let mut issues = Vec::new();
+        let mut clutter = Vec::new();
+        let mut dirs = vec![(self.root.clone(), 0)];
+        while let Some((dir, depth)) = dirs.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut entries: Vec<_> = entries.flatten().collect();
+            entries.sort_by_key(|e| e.file_name());
+            for e in entries {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let path = e.path();
+                if is_clutter(&name) {
+                    clutter.push(path);
+                } else if name.starts_with('.') {
+                    continue;
+                } else if path.is_dir() {
+                    if depth == 0 {
+                        dirs.push((path, depth + 1));
+                    }
+                } else if depth > 0 || slot_index(&name).is_none() {
+                    let ext = path
+                        .extension()
+                        .map(|x| x.to_string_lossy().to_ascii_lowercase())
+                        .unwrap_or_default();
+                    if AUDIO_EXTENSIONS.contains(&ext.as_str()) {
+                        let wav = ext == "wav" || ext == "wave";
+                        issues.push(CardIssue::Stray { path, wav });
+                    }
+                }
+            }
+        }
+        if !clutter.is_empty() {
+            clutter.sort();
+            issues.push(CardIssue::Clutter { paths: clutter });
+        }
+        issues
+    }
+
+    /// Delete the macOS metadata files [`Card::issues`] lists. Returns how
+    /// many went.
+    pub fn remove_clutter(&self) -> Result<usize> {
+        let mut removed = 0;
+        for issue in self.issues() {
+            if let CardIssue::Clutter { paths } = issue {
+                for path in paths {
+                    fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Rewrite a slot's reel as 48 kHz 32-bit float stereo, keeping its
+    /// markers. Backs up the old file first and returns the new bytes.
+    pub fn convert_slot(&self, index: usize, backup_dir: &Path) -> Result<Vec<u8>> {
+        let bytes = Reel::open(&self.slot_path(index))?.to_wav_bytes()?;
+        self.write_slot(index, &bytes, backup_dir)?;
+        Ok(bytes)
+    }
+
+    /// Put a WAV file from elsewhere on the card into an empty slot,
+    /// converted and with its markers, then back it up and remove it from
+    /// where it was. Returns the reel's bytes.
+    pub fn adopt(&self, path: &Path, index: usize, backup_dir: &Path) -> Result<Vec<u8>> {
+        if self.slot_path(index).exists() {
+            bail!("{} already holds a reel", slot_file_name(index));
+        }
+        let on_card = fs::canonicalize(path)
+            .ok()
+            .zip(fs::canonicalize(&self.root).ok())
+            .is_some_and(|(p, root)| p.starts_with(root) && p.is_file());
+        if !on_card {
+            bail!("{} isn't a file on this card", path.display());
+        }
+        let bytes = Reel::open(path)?.to_wav_bytes()?;
+        self.write_slot(index, &bytes, backup_dir)?;
+        backup_file(path, backup_dir)?;
+        fs::remove_file(path)?;
+        Ok(bytes)
+    }
+
+    /// Put a file from a backup folder back on the card: a reel into the
+    /// slot its name gives, or `options.txt`. What it replaces is backed up
+    /// first. Returns the file's bytes.
+    pub fn restore_file(&self, from: &Path, backup_dir: &Path) -> Result<Vec<u8>> {
+        let name = from
+            .file_name()
+            .context("no file name")?
+            .to_string_lossy()
+            .into_owned();
+        let target = if name.eq_ignore_ascii_case(OPTIONS_FILE) {
+            self.options_path()
+        } else {
+            self.slot_path(slot_index(&name).with_context(|| format!("{name} isn't a reel or options.txt"))?)
+        };
+        let bytes = fs::read(from).with_context(|| format!("reading {}", from.display()))?;
+        write_safely(&target, &bytes, backup_dir)?;
+        Ok(bytes)
+    }
+
     /// Copy every reel and `options.txt` into a new timestamped folder under
     /// `dest`, and return that folder.
     pub fn backup(&self, dest: &Path) -> Result<PathBuf> {
@@ -310,7 +433,7 @@ fn backup_file(path: &Path, backup_dir: &Path) -> Result<()> {
 
 /// Create `base`, or `base-2`, `base-3`... if it exists, so two backups in
 /// the same second never share a folder.
-fn new_dir(base: &Path) -> Result<PathBuf> {
+pub(crate) fn new_dir(base: &Path) -> Result<PathBuf> {
     fs::create_dir_all(base.parent().context("backup folder has no parent")?)?;
     for n in 1.. {
         let dir = if n == 1 {
@@ -328,7 +451,7 @@ fn new_dir(base: &Path) -> Result<PathBuf> {
 }
 
 /// UTC `YYYYMMDD-HHMMSS`, without a date crate.
-fn timestamp() -> String {
+pub(crate) fn timestamp() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

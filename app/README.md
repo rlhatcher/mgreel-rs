@@ -4,7 +4,14 @@ Desktop app for a Make Noise Morphagene microSD card, built on
 `mgreel-core` with Tauri v2 and SvelteKit.
 
 - Library: the card's 32 reel slots. Drag to move a reel, Option-drag to
-  swap, back up and restore the whole card.
+  swap, back up and restore the whole card, eject it.
+  - Card check: flags reels the module can't play and converts them to
+    48 kHz 32-bit float stereo with their markers, puts WAV files with the
+    wrong name or in a folder into a free slot, removes macOS `._` and
+    `.DS_Store` files, and warns when the card isn't FAT32.
+  - When a card mounts, the app copies any reel it hasn't seen, such as
+    one recorded or spliced on the module, before anything can replace it.
+    History lists every copy and puts any single file back.
 - Splices: the reel editor.
   - Playback that behaves like the module: the selected splice loops, and
     Organize (0 to 5 V) or Shift picks the next one, which starts when the
@@ -25,7 +32,9 @@ Desktop app for a Make Noise Morphagene microSD card, built on
 - options.txt: edit firmware options; only the values change.
 
 Every change to the card copies the old file to
-`~/Library/Application Support/com.rlhatcher.mgreel/backups/` first.
+`~/Library/Application Support/com.rlhatcher.mgreel/backups/` first. The
+first time the app sees a card it copies every reel there, so expect that
+folder to hold about one card's worth per card.
 
 ## Develop
 
