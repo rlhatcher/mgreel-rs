@@ -120,7 +120,8 @@ pub struct Skipped {
 
 /// Make a set from a folder of WAV files, such as a downloaded reel pack.
 /// Files named `mg1.wav` to `mgw.wav` at the top keep their slots, and
-/// their names in the pack's `mgreel.json`. The rest fill the free slots in
+/// their names in the pack's `mgreel.json`; if one can't be read, its slot
+/// stays empty, as the pack laid it out. The rest fill the other slots in
 /// Finder's name order, subfolders included, each named after its file.
 /// Every reel is converted to 48 kHz 32-bit float stereo with its markers.
 /// The set takes the folder's name, with a number added if that's taken.
@@ -211,7 +212,8 @@ pub fn import(pack: &Path, root: &Path) -> Result<Import> {
                 Err(e) => note_error(source, e),
             }
         }
-        // A file that can't be read leaves its slot to the next one.
+        // Slots named by a file stay that file's, read or not. Among the
+        // rest, one that can't be read leaves its slot to the next file.
         let mut free = (0..SLOT_COUNT)
             .filter(|i| !fixed.iter().any(|(j, _, _)| j == i))
             .peekable();

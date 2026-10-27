@@ -218,6 +218,18 @@ fn import_reports_reels_the_module_would_refuse() {
 }
 
 #[test]
+fn a_named_slot_that_cant_be_read_stays_empty() {
+    let pack = tempdir();
+    let sets_root = tempdir();
+    fs::write(pack.join("mg1.wav"), b"not a wav").unwrap();
+    fs::write(pack.join("Gulls.wav"), reel_bytes(10, vec![])).unwrap();
+    let imported = sets::import(&pack, &sets_root).unwrap();
+    assert_eq!(imported.placed[0].slot, 1);
+    assert_eq!(imported.skipped[0].source, "mg1.wav");
+    assert_eq!(entries(&imported.dir), vec!["mg2.wav", "mgreel.json"]);
+}
+
+#[test]
 fn a_pack_too_big_for_a_card_is_refused() {
     let pack = tempdir();
     let sets_root = tempdir();
