@@ -12,6 +12,7 @@
     probeSources,
     type Slot,
     type Source,
+    type Target,
   } from "./api";
 
   type Props = {
@@ -26,6 +27,7 @@
   type Row = Source & { id: number; start: string; end: string };
   let rows = $state<Row[]>([]);
   let normalize = $state(false);
+  let keepMarkers = $state(true);
   let fadeMs = $state(0);
   let building = $state(false);
   let dropping = $state(false);
@@ -42,10 +44,18 @@
     return [start, Math.max(start, end)];
   }
 
+  /** The file's own markers inside its trim range. */
+  function inside(row: Row) {
+    const [start, end] = range(row);
+    return row.markers.filter((m) => m > start && m < end).length;
+  }
+
   const usable = $derived(rows.filter((r) => !r.error));
   const total = $derived(usable.reduce((sum, r) => sum + (range(r)[1] - range(r)[0]), 0));
+  const kept = $derived(keepMarkers ? usable.reduce((sum, r) => sum + inside(r), 0) : 0);
+  const spliceCount = $derived(usable.length + kept);
   const tooLong = $derived(total > MAX_FRAMES);
-  const tooMany = $derived(usable.length - 1 > MAX_MARKERS);
+  const tooMany = $derived(spliceCount - 1 > MAX_MARKERS);
 
   async function add(paths: string[]) {
     const wavs = paths.filter((p) => /\.wave?$/i.test(p));
@@ -72,7 +82,7 @@
   }
 
   async function build() {
-    let dest: Parameters<typeof buildReel>[3];
+    let dest: Target;
     if (target === null) {
       const path = await save({ defaultPath: "reel.wav", filters: [{ name: "WAV audio", extensions: ["wav"] }] });
       if (!path) return;
@@ -96,7 +106,7 @@
         const trimmed = start > 0 || end < r.frames;
         return { path: r.path, start: trimmed ? start : null, end: trimmed ? end : null };
       });
-      const result = await buildReel(specs, normalize, fadeMs, dest);
+      const result = await buildReel(specs, normalize, fadeMs, keepMarkers, dest);
       notify(`Wrote ${formatTime(result.frames)} with ${result.markers + 1} splices to ${result.writtenTo}`);
       await onbuilt();
     } catch (e) {
@@ -125,8 +135,9 @@
 <section class:dropping>
   <header>
     <p class="muted">
-      Add WAV files in the order you want them. Each becomes a splice. Any sample rate, bit depth,
-      mono or stereo; the reel is written as 48 kHz 32-bit float stereo.
+      Add WAV files in the order you want them. Each becomes a splice, and markers saved in a file
+      split it further. Any sample rate, bit depth, mono or stereo; the reel is written as 48 kHz
+      32-bit float stereo.
     </p>
     <button onclick={pick}>Add files…</button>
   </header>
@@ -145,6 +156,11 @@
             <td>
               {row.name}
               {#if row.error}<div class="error small">{row.error}</div>{/if}
+              {#if !row.error && inside(row) > 0}
+                <div class="muted small">
+                  {inside(row)} marker{inside(row) === 1 ? "" : "s"}{keepMarkers ? "" : ", not kept"}
+                </div>
+              {/if}
             </td>
             <td class="num">{formatTime(range(row)[1] - range(row)[0])}</td>
             <td><input class="num" placeholder="0" bind:value={row.start} disabled={!!row.error} /></td>
@@ -172,13 +188,18 @@
     <div class="fill" style:width="{Math.min(1, total / MAX_FRAMES) * 100}%"></div>
   </div>
   <p class="num" class:error={tooLong || tooMany}>
-    {formatTime(total)} of {formatTime(MAX_FRAMES)} · {Math.max(0, usable.length)} splices
+    {formatTime(total)} of {formatTime(MAX_FRAMES)} · {spliceCount} splices
     {#if tooLong} · too long for the Morphagene{/if}
     {#if tooMany} · more than {MAX_MARKERS + 1} splices{/if}
   </p>
 
   <div class="options">
     <label><input type="checkbox" bind:checked={normalize} /> Normalize each file to −1 dBFS</label>
+    <label
+      title="Cue points and region ends saved in the files, from a DAW, RX or the module, become splices too"
+    >
+      <input type="checkbox" bind:checked={keepMarkers} /> Keep the files' markers
+    </label>
     <label>
       Fade edges <input class="num fade" type="number" min="0" max="500" bind:value={fadeMs} /> ms
     </label>

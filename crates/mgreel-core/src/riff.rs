@@ -128,16 +128,64 @@ pub fn encode_cues(markers: &[u32]) -> Chunk {
 
 /// Read splice markers from a `cue ` chunk, sorted and de-duplicated.
 pub fn decode_cues(data: &[u8]) -> Vec<u32> {
-    let count = data
-        .get(..4)
-        .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
-    let mut markers: Vec<u32> = data[4.min(data.len())..]
+    let mut markers: Vec<u32> = cue_points(data).into_iter().map(|(_, at)| at).collect();
+    markers.sort_unstable();
+    markers.dedup();
+    markers
+}
+
+fn le32(b: &[u8]) -> u32 {
+    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
+
+/// The id and dwSampleOffset of each point in a `cue ` chunk, in file order.
+pub fn cue_points(data: &[u8]) -> Vec<(u32, u32)> {
+    let count = data.get(..4).map_or(0, |b| le32(b) as usize);
+    data[4.min(data.len())..]
         .as_chunks::<24>()
         .0
         .iter()
         .take(count)
-        .map(|p| u32::from_le_bytes([p[20], p[21], p[22], p[23]]))
-        .collect();
+        .map(|p| (le32(&p[..4]), le32(&p[20..])))
+        .collect()
+}
+
+/// The cue id and length in samples of each `ltxt` region in a `LIST`
+/// chunk's data. A list that isn't `adtl` has none.
+pub fn ltxt_regions(list: &[u8]) -> Vec<(u32, u32)> {
+    let Some(mut rest) = list.strip_prefix(b"adtl") else {
+        return Vec::new();
+    };
+    let mut regions = Vec::new();
+    while rest.len() >= 8 {
+        let size = le32(&rest[4..8]) as usize;
+        let Some(body) = rest.get(8..8 + size) else {
+            break;
+        };
+        if &rest[..4] == b"ltxt" && body.len() >= 8 {
+            regions.push((le32(&body[..4]), le32(&body[4..8])));
+        }
+        // Subchunks are padded to an even length.
+        rest = rest.get(8 + size + (size & 1)..).unwrap_or_default();
+    }
+    regions
+}
+
+/// The splice points a file from other software carries, at its own sample
+/// rate: its cue points and the end of each `ltxt` region, sorted. RX and
+/// Pro Tools mark a region with a cue point and an `ltxt` length, and the
+/// module reads only cue points, so a reel would lose the region ends. Not
+/// for reading a reel already on the card: there only the cue points count.
+pub fn source_markers(cue: Option<&[u8]>, lists: &[&[u8]]) -> Vec<u32> {
+    let points = cue.map(cue_points).unwrap_or_default();
+    let mut markers: Vec<u32> = points.iter().map(|&(_, at)| at).collect();
+    for list in lists {
+        for (id, length) in ltxt_regions(list) {
+            if let Some(&(_, start)) = points.iter().find(|&&(p, _)| p == id) {
+                markers.push(start.saturating_add(length));
+            }
+        }
+    }
     markers.sort_unstable();
     markers.dedup();
     markers
@@ -198,6 +246,45 @@ impl Format {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sub(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = id.to_vec();
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(body);
+        if body.len() % 2 == 1 {
+            out.push(0);
+        }
+        out
+    }
+
+    #[test]
+    fn region_ends_count_as_source_markers() {
+        // Cue 1 at 100 starts a 50-sample region; cue 2 at 400 is a point.
+        let cue = encode_cues(&[100, 400]);
+        let mut ltxt = Vec::new();
+        ltxt.extend_from_slice(&1u32.to_le_bytes());
+        ltxt.extend_from_slice(&50u32.to_le_bytes());
+        ltxt.extend_from_slice(b"rgn \0\0\0\0\0\0\0\0");
+        let mut list = b"adtl".to_vec();
+        // An odd-length label before it checks the padding.
+        let mut labl = 2u32.to_le_bytes().to_vec();
+        labl.extend_from_slice(b"hit\0\0");
+        list.extend(sub(b"labl", &labl));
+        list.extend(sub(b"ltxt", &ltxt));
+        assert_eq!(ltxt_regions(&list), vec![(1, 50)]);
+        assert_eq!(
+            source_markers(Some(&cue.data), &[&list]),
+            vec![100, 150, 400]
+        );
+        // Only cue points without the list, and nothing from other lists.
+        assert_eq!(
+            source_markers(Some(&cue.data), &[b"INFOISFT"]),
+            vec![100, 400]
+        );
+        assert_eq!(decode_cues(&cue.data), vec![100, 400]);
+        // A region whose cue is missing adds nothing.
+        assert_eq!(source_markers(None, &[&list]), Vec::<u32>::new());
+    }
 
     fn fmt_chunk(channels: u16, rate: u32, bits: u16) -> Vec<u8> {
         let mut fmt = Vec::new();

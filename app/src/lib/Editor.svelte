@@ -5,22 +5,27 @@
   import Thumb from "./Thumb.svelte";
   import Waveform from "./Waveform.svelte";
   import {
+    MARKER_FILE_EXTENSIONS,
     MAX_FRAMES,
     MAX_MARKERS,
     SAMPLE_RATE,
     applySpans,
     autoSlice,
     copySplices,
+    deleteSplices,
     editReel,
     errorText,
     exportSplices,
     insertFiles,
     formatTime,
     loadReel,
+    mergeShortSplices,
     pasteSplices,
     putFile,
+    readMarkerFile,
     saveReel,
     seekHistory,
+    silentSplices,
     type EditOp,
     type EditResult,
     type LoadedReel,
@@ -56,6 +61,12 @@
   let saving = $state(false);
   let snap = $state(true);
   let splitCount = $state(8);
+  /** Where the reel's audio starts on a marker file's timeline, in seconds. */
+  let importOffset = $state(0);
+  let importReplace = $state(false);
+  /** Tidy: a sample below this level counts as silence. */
+  let silenceDb = $state(-60);
+  let shortestMs = $state(50);
   let sliceMode = $state<SliceMode>("phrases");
   let sliceMin = $state(4);
   /** Empty means no limit. */
@@ -279,12 +290,15 @@
    * Run a command that edits the open reel, then take in its result.
    * `after` gets how many splices were added and returns what to pick;
    * the cursor moves to the start of splice `focus` or the pick.
+   * `mapLocks`, when given, says where the locks go instead of
+   * `shiftLocks`.
    */
   async function edit(
     call: () => Promise<EditResult>,
     after: (added: number) => { first: number; last: number } | null,
     focus: number,
     keepOrder = false,
+    mapLocks?: (next: number[]) => Set<number>,
   ) {
     if (busy || saving || !reel) return;
     busy = true;
@@ -301,7 +315,7 @@
       // steps that point there (left by Revert) can't be restored.
       if (r.state !== audioState) undoStack = undoStack.filter((u) => u.audio <= before.audio);
       pushUndo(before);
-      locked = shiftLocks(r, next, keepOrder);
+      locked = mapLocks ? mapLocks(next) : shiftLocks(r, next, keepOrder);
       applyAudio(r);
       markers = next;
       selectedMarker = null;
@@ -643,6 +657,111 @@
     if (next.has(m)) next.delete(m);
     else next.add(m);
     locked = next;
+  }
+
+  /** Put the markers from a DAW, label or WAV file on the reel. */
+  async function importMarkers() {
+    if (!reel) return;
+    const path = await openDialog({
+      filters: [{ name: "Markers", extensions: MARKER_FILE_EXTENSIONS }],
+      title: "Choose an Audacity label file, REAPER marker export, Ableton Live set or WAV file",
+    });
+    if (typeof path !== "string") return;
+    // Reading runs off the main thread, so drop the result if the markers
+    // changed meanwhile, as auto-slice does.
+    const started = snapshot();
+    try {
+      const offset = Number.isFinite(importOffset) ? importOffset : 0;
+      const r = await readMarkerFile(path, offset, frames);
+      if (!same(started, snapshot())) {
+        notify("The markers changed while the file was read, so nothing was imported. Import it again.", true);
+        return;
+      }
+      const keep = importReplace ? markers.filter((m) => locked.has(m)) : markers;
+      const next = [...new Set([...keep, ...r.markers])].sort((a, b) => a - b);
+      const name = path.split("/").pop();
+      const parts = [];
+      if (sameMarkers(next, markers)) {
+        parts.push(`The markers in ${name} are on the reel already.`);
+      } else {
+        record();
+        markers = next;
+        selectedMarker = null;
+        parts.push(`Imported ${r.markers.length} marker${r.markers.length === 1 ? "" : "s"} from ${name}. Not saved yet.`);
+      }
+      if (r.outside) {
+        parts.push(`${r.outside} fell before the audio or after its end and ${r.outside === 1 ? "was" : "were"} left out.`);
+      }
+      parts.push(...r.warnings);
+      notify(parts.join(" "), r.warnings.length > 0);
+    } catch (e) {
+      notify(errorText(e), true);
+    }
+  }
+
+  /** Tidy: delete every splice that stays below the silence level. */
+  function dropSilent() {
+    const db = silenceDb;
+    const before = markers.slice();
+    let gone: number[] = [];
+    return edit(
+      async () => {
+        gone = await silentSplices(root, slot.index, before, db);
+        if (!gone.length) throw new Error(`No splice stays below ${db} dBFS.`);
+        if (gone.length === before.length + 1) {
+          throw new Error(`Every splice stays below ${db} dBFS, and a reel needs at least one.`);
+        }
+        return deleteSplices(root, slot.index, before, gone);
+      },
+      () => {
+        notify(`Deleted ${gone.length} silent splice${gone.length === 1 ? "" : "s"}. Not saved yet.`);
+        return null;
+      },
+      0,
+      false,
+      (next) => {
+        // The kept splices stay in order, so each lock moves to where its
+        // splice now starts. A splice that becomes the first loses its lock.
+        const starts = [0, ...before];
+        const nextStarts = [0, ...next];
+        const kept = starts.flatMap((start, i) => (gone.includes(i) ? [] : [start]));
+        return new Set(kept.flatMap((start, j) => (locked.has(start) && nextStarts[j] > 0 ? [nextStarts[j]] : [])));
+      },
+    );
+  }
+
+  /** Tidy: cut the silence at the start of every splice. */
+  function trimStarts() {
+    return edit(
+      () => editReel(root, slot.index, markers, 0, splices.length - 1, { kind: "trimStart", db: silenceDb }),
+      () => null,
+      current,
+      true,
+    );
+  }
+
+  /** Tidy: join splices shorter than the shortest to a neighbour. */
+  async function mergeShort() {
+    if (!reel) return;
+    const started = snapshot();
+    try {
+      const next = await mergeShortSplices(markers, frames, shortestMs, [...locked]);
+      if (!same(started, snapshot())) {
+        notify("The markers changed meanwhile, so nothing was merged. Merge again.", true);
+        return;
+      }
+      if (sameMarkers(next, markers)) {
+        notify(`No splice is shorter than ${shortestMs} ms, apart from any between locked markers.`);
+        return;
+      }
+      const merged = markers.length - next.length;
+      record();
+      markers = next;
+      selectedMarker = null;
+      notify(`Merged ${merged} short splice${merged === 1 ? "" : "s"} into a neighbour. Not saved yet.`);
+    } catch (e) {
+      notify(errorText(e), true);
+    }
   }
 
   function removeUnlocked() {
@@ -1193,6 +1312,47 @@
           equal splices
         </label>
         <button onclick={splitEvenly}>Replace markers</button>
+        <button
+          onclick={importMarkers}
+          title="From an Audacity label file, a REAPER marker export (.csv), an Ableton Live set's locators, or a WAV file's cue points and region ends"
+        >
+          Import markers…
+        </button>
+        <label title="If the audio was exported from later than the start of the file's timeline, how much later">
+          Audio starts at
+          <input type="number" step="0.1" bind:value={importOffset} /> s
+        </label>
+        <label><input type="checkbox" bind:checked={importReplace} /> Replace the unlocked markers</label>
+
+        <h3>Tidy</h3>
+        <p class="muted small">
+          For reels recorded or spliced on the module. Each works on the whole reel and undoes on its own.
+        </p>
+        <label>
+          Silence is below
+          <input type="number" max="0" step="6" bind:value={silenceDb} /> dBFS
+        </label>
+        <div class="row">
+          <button onclick={dropSilent} disabled={busy || splices.length < 2}>Delete silent splices</button>
+          <button
+            onclick={trimStarts}
+            disabled={busy}
+            title="Cut each splice's silent start, leaving 5 ms before the sound so the attack stays"
+          >
+            Trim silent starts
+          </button>
+        </div>
+        <label>
+          Shortest splice
+          <input type="number" min="1" step="10" bind:value={shortestMs} /> ms
+        </label>
+        <button
+          onclick={mergeShort}
+          disabled={splices.length < 2}
+          title="Join each shorter splice to its shorter neighbour. Locked markers stay."
+        >
+          Merge shorter splices
+        </button>
         <button class="danger" onclick={removeUnlocked} disabled={markers.every((m) => locked.has(m))}>
           {locked.size ? "Remove unlocked markers" : "Remove all markers"}
         </button>

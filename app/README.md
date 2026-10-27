@@ -35,8 +35,20 @@ Desktop app for a Make Noise Morphagene microSD card, built on
   - Add audio: insert WAV files as new splices (or drop them on the
     editor), replace a splice with a file, mix a file in with an S.O.S.
     balance, export splices as WAV files.
+  - Import markers from an Audacity label file, a REAPER marker export
+    (.csv, with time as minutes:seconds or seconds), an Ableton Live set's
+    locators (at the set's tempo; a set whose tempo changes gets a
+    warning), or a WAV file's cue points and region ends. A region's end
+    becomes a marker too. If the audio was exported from later than the
+    start of the timeline, say how much later.
+  - Tidy, for reels recorded or spliced on the module: delete silent
+    splices, trim the silence at each splice's start (keeping 5 ms before
+    the sound), and merge splices shorter than a length into a neighbour.
+    Locked markers stay.
   - Undo and redo for all of it, and a spectrogram view.
 - Build: join WAV files into a new reel, with trims, normalize and fades.
+  Markers saved in the files (cue points, and the region ends RX and Pro
+  Tools write) split them further, unless you turn that off.
 - options.txt: edit firmware options; only the values change.
 - Sets: whole cards kept in `~/Music/Morphagene Sets`, one folder per set
   laid out like a card (reels, `options.txt`, `mgreel.json`). Save the open

@@ -63,6 +63,13 @@ Convert all WAV files in a directory:
 mgreel --out morphagene-reel.wav samples/*.wav
 ```
 
+Keep the markers saved in the files, such as cue points from a DAW or the
+region ends RX and Pro Tools write, as splices too:
+
+```bash
+mgreel --keep-markers --out morphagene-reel.wav take1.wav take2.wav
+```
+
 ## How it works
 
 1. Reads each input WAV file (8, 16, 24 or 32-bit PCM, or 32/64-bit float)

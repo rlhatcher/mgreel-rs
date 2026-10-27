@@ -16,7 +16,7 @@
 //! Either way, a longest-splice setting then cuts any splice still too long
 //! at its quietest point.
 
-use crate::reel::{MAX_MARKERS, SAMPLE_RATE};
+use crate::reel::{clean_markers, MAX_MARKERS, SAMPLE_RATE};
 
 /// 10 ms at 48 kHz.
 const HOP: usize = 480;
@@ -65,6 +65,51 @@ impl Options {
 }
 
 /// Sorted marker positions in frames.
+/// Remove markers until no splice is shorter than `min` frames, as far as
+/// locked markers allow. The shortest splice goes first, joining whichever
+/// neighbour is shorter. A short splice between two locked markers stays.
+pub fn merge_short(markers: &[u32], frames: u32, min: u32, locked: &[u32]) -> Vec<u32> {
+    let mut markers = clean_markers(markers.to_vec(), frames);
+    loop {
+        // Splice i runs from bounds[i] to bounds[i + 1]. Marker k is
+        // bounds[k + 1], so splice i starts at marker i - 1 and ends at i.
+        let mut bounds = vec![0];
+        bounds.extend(&markers);
+        bounds.push(frames);
+        let len = |i: usize| bounds[i + 1] - bounds[i];
+        let count = bounds.len() - 1;
+        // The shortest short splice that can join a neighbour, and the
+        // marker that goes for it.
+        let mut best: Option<(u32, usize)> = None;
+        for i in (0..count).filter(|&i| len(i) < min) {
+            let before = (i > 0 && !locked.contains(&bounds[i])).then(|| (len(i - 1), i - 1));
+            let after =
+                (i + 1 < count && !locked.contains(&bounds[i + 1])).then(|| (len(i + 1), i));
+            let marker = match (before, after) {
+                (Some(b), Some(a)) => {
+                    if a.0 < b.0 {
+                        a.1
+                    } else {
+                        b.1
+                    }
+                }
+                (Some(b), None) => b.1,
+                (None, Some(a)) => a.1,
+                (None, None) => continue,
+            };
+            if best.is_none_or(|(shortest, _)| len(i) < shortest) {
+                best = Some((len(i), marker));
+            }
+        }
+        match best {
+            Some((_, marker)) => {
+                markers.remove(marker);
+            }
+            None => return markers,
+        }
+    }
+}
+
 pub fn auto_slice(left: &[f32], right: &[f32], options: Options) -> Vec<u32> {
     let mono: Vec<f32> = left.iter().zip(right).map(|(l, r)| (l + r) * 0.5).collect();
     let frames = mono.len();
@@ -487,6 +532,22 @@ impl Prefix {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_short_joins_the_shorter_neighbour_and_keeps_locks() {
+        // Splices of 10, 490, 5, 395 and 100 frames.
+        let markers = [10, 500, 505, 900];
+        // The 5-frame splice joins the 395 after it, then the 10 joins the 490.
+        assert_eq!(merge_short(&markers, 1000, 50, &[]), vec![500, 900]);
+        // A locked marker at 10 keeps the first splice short.
+        assert_eq!(merge_short(&markers, 1000, 50, &[10]), vec![10, 500, 900]);
+        // Locks on both sides of the 5-frame splice keep it too.
+        assert_eq!(
+            merge_short(&markers, 1000, 50, &[500, 505]),
+            vec![500, 505, 900]
+        );
+        assert_eq!(merge_short(&markers, 1000, 1, &[]), markers.to_vec());
+    }
 
     /// Deterministic white noise.
     fn noise(len: usize, seed: &mut u32) -> Vec<f32> {
