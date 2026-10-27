@@ -2169,6 +2169,8 @@ dependencies = [
  "anyhow",
  "hound",
  "rubato",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 

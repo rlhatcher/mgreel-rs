@@ -188,7 +188,9 @@
         <option value={null}>A file…</option>
         {#each slots as slot}
           <option value={slot.index}>
-            {slot.fileName}{slot.present ? ` (replaces ${formatTime(slot.frames)})` : " (empty)"}
+            {slot.fileName}{slot.name ? ` ${slot.name}` : ""}{slot.present
+              ? ` (replaces ${formatTime(slot.frames)})`
+              : " (empty)"}
           </option>
         {/each}
       </select>

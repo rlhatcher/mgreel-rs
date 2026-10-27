@@ -12,6 +12,14 @@ Desktop app for a Make Noise Morphagene microSD card, built on
   - When a card mounts, the app copies any reel it hasn't seen, such as
     one recorded or spliced on the module, before anything can replace it.
     History lists every copy and puts any single file back.
+  - Names and notes: give each reel a name and a short note. The app keeps
+    them in `mgreel.json` at the card root, moves them with the reel when
+    you move or swap it in the app, and includes them in card backups.
+    Names don't follow a reel that is moved or deleted on the module or in
+    Finder.
+  - Reel mode: each reel shows the colour the module gives it in Reel mode
+    and a dial at about the Organize position that selects it. Play
+    previews a reel from its start.
 - Splices: the reel editor.
   - Playback that behaves like the module: the selected splice loops, and
     Organize (0 to 5 V) or Shift picks the next one, which starts when the

@@ -20,6 +20,9 @@ export type Slot = {
   /** Readable but not in Morphagene format, so convertSlot can fix it. */
   convertible: boolean;
   problems: string[];
+  /** From mgreel.json on the card; empty when unnamed. */
+  name: string;
+  note: string;
 };
 
 export type CardCheck = {
@@ -29,6 +32,8 @@ export type CardCheck = {
   stray: { path: string; name: string; wav: boolean }[];
   /** How many macOS metadata files are on the card. */
   clutter: number;
+  /** Why mgreel.json, which holds the reel names, can't be read. */
+  namesError: string | null;
 };
 
 export type BackupKind = "beforeChange" | "wholeCard" | "fromCard";
@@ -85,6 +90,10 @@ export const listBackups = (root: string) => invoke<Backup[]>("list_backups", { 
 export const restoreFile = (root: string, dir: string, file: string) =>
   invoke<void>("restore_file", { root, dir, file });
 export const ejectCard = (root: string) => invoke<void>("eject_card", { root });
+export const setReelName = (root: string, index: number, name: string, note: string) =>
+  invoke<void>("set_reel_name", { root, index, name, note });
+/** Back up mgreel.json, then remove it. */
+export const removeNames = (root: string) => invoke<void>("remove_names", { root });
 
 export async function loadReel(root: string, index: number): Promise<LoadedReel> {
   const buffer = await invoke<ArrayBuffer>("load_reel", { root, index });

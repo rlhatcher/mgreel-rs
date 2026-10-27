@@ -866,7 +866,7 @@
 
 <section class:dropping>
   <header>
-    <h2 class="num">{slot.fileName}</h2>
+    <h2><span class="num">{slot.fileName}</span>{#if slot.name}<span class="reel-name">{slot.name}</span>{/if}</h2>
     <span class="muted num">
       {formatTime(frames)} · {markers.length + 1} splices
       {#if dirty}· <strong class="unsaved">unsaved</strong>{/if}
@@ -1211,6 +1211,10 @@
   h2 {
     margin: 0;
     font-size: 18px;
+  }
+  .reel-name {
+    margin-left: 10px;
+    font-weight: 400;
   }
   .unsaved {
     color: var(--accent);

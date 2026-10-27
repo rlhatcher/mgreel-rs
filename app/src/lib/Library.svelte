@@ -13,16 +13,21 @@
     errorText,
     formatTime,
     listBackups,
+    loadReel,
     moveSlot,
     removeClutter,
+    removeNames,
     restoreCard,
     restoreFile,
+    SAMPLE_RATE,
+    setReelName,
     swapSlots,
     type Backup,
     type BackupKind,
     type CardCheck,
     type Slot,
   } from "./api";
+  import { reelSpots } from "./reelmode";
 
   type Props = {
     root: string;
@@ -44,8 +49,13 @@
   /** Folders under /Volumes are mounted cards; anything else was opened by hand. */
   const mounted = $derived(/^\/Volumes\/[^/]+$/.test(root));
   const hasIssues = $derived(
-    !!check && (check.wrongFilesystem !== null || check.stray.length > 0 || check.clutter > 0),
+    !!check &&
+      (check.wrongFilesystem !== null ||
+        check.stray.length > 0 ||
+        check.clutter > 0 ||
+        check.namesError !== null),
   );
+  const spots = $derived(reelSpots(slots));
 
   // Look the card over whenever it or its slots change.
   $effect(() => {
@@ -73,6 +83,8 @@
   }
 
   async function run(action: () => Promise<unknown>, done: string) {
+    // The reels may move or change, so the preview stops first.
+    stopPlaying();
     busy = true;
     try {
       await action();
@@ -94,7 +106,7 @@
 
   function startPress(e: PointerEvent, slot: Slot) {
     if (e.button !== 0 || !slot.present || busy) return;
-    if ((e.target as Element).closest("button")) return;
+    if ((e.target as Element).closest("button, input")) return;
     press = { index: slot.index, x: e.clientX, y: e.clientY };
   }
 
@@ -152,6 +164,89 @@
         await recheck(root);
       });
   }
+
+  /** Save a name or note when its field loses focus or Enter is pressed. */
+  async function saveLabel(slot: Slot, field: "name" | "note", input: HTMLInputElement) {
+    const name = field === "name" ? input.value.trim() : slot.name;
+    const note = field === "note" ? input.value.trim() : slot.note;
+    if (name === slot.name && note === slot.note) return;
+    try {
+      await setReelName(root, slot.index, name, note);
+      await onchanged();
+    } catch (e) {
+      input.value = slot[field];
+      notify(errorText(e), true);
+    }
+  }
+
+  function labelKey(e: KeyboardEvent, slot: Slot, field: "name" | "note") {
+    const input = e.currentTarget as HTMLInputElement;
+    if (e.key === "Enter") input.blur();
+    if (e.key === "Escape") {
+      input.value = slot[field];
+      input.blur();
+    }
+  }
+
+  async function dropNames() {
+    const yes = await ask(
+      "Remove mgreel.json? Every reel on the card loses its name and note. A copy goes to the backups folder.",
+      { title: "Remove reel names", kind: "warning" },
+    );
+    if (!yes) return;
+    await run(() => removeNames(root), "Removed mgreel.json");
+    await recheck(root);
+  }
+
+  // One reel plays at a time, from its start, like the module's Reel mode
+  // preview.
+  let playing = $state<number | null>(null);
+  let player: { ctx: AudioContext; source: AudioBufferSourceNode } | null = null;
+  /** Numbers each play, so a reel that finishes loading late doesn't start. */
+  let playRun = 0;
+
+  function stopPlaying() {
+    playRun++;
+    player?.source.stop();
+    player?.ctx.close();
+    player = null;
+    playing = null;
+  }
+
+  async function togglePlay(slot: Slot) {
+    const again = playing === slot.index;
+    stopPlaying();
+    if (again) return;
+    const run = playRun;
+    playing = slot.index;
+    try {
+      const reel = await loadReel(root, slot.index);
+      if (run !== playRun) return;
+      const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
+      const buffer = ctx.createBuffer(2, Math.max(1, reel.left.length), SAMPLE_RATE);
+      buffer.copyToChannel(reel.left as Float32Array<ArrayBuffer>, 0);
+      buffer.copyToChannel(reel.right as Float32Array<ArrayBuffer>, 1);
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.onended = () => {
+        if (run === playRun) stopPlaying();
+      };
+      source.start();
+      player = { ctx, source };
+    } catch (e) {
+      if (run === playRun) {
+        playing = null;
+        notify(errorText(e), true);
+      }
+    }
+  }
+
+  // Switching cards stops the preview, and so does leaving.
+  $effect(() => {
+    void root;
+    return stopPlaying;
+  });
 
   async function eject() {
     busy = true;
@@ -238,7 +333,8 @@
 <section>
   <header>
     <p class="muted">
-      {used} of 32 slots used. Drag a reel to move it; hold Option while dropping to swap.
+      {used} of 32 slots used. Drag a reel to move it; hold Option while dropping to swap. The dot is the
+      reel's colour in Reel mode, and the dial is about where Organize selects it.
     </p>
     <div class="actions">
       <button onclick={backup} disabled={busy}>Back up card</button>
@@ -283,6 +379,15 @@
           {/if}
         </div>
       {/each}
+      {#if check.namesError}
+        <div class="issue">
+          <span class="small">
+            mgreel.json, where the app keeps reel names, can't be read: {check.namesError}. Until it's fixed or
+            removed, the app won't move, remove or name reels.
+          </span>
+          <button onclick={dropNames} disabled={busy}>Remove</button>
+        </div>
+      {/if}
       {#if check.clutter > 0}
         <div class="issue">
           <span class="small">
@@ -321,6 +426,7 @@
 
   <ol class="grid">
     {#each slots as slot (slot.index)}
+      {@const spot = spots.get(slot.index)}
       <li
         class="slot"
         class:empty={!slot.present}
@@ -332,13 +438,45 @@
         onpointerdown={(e) => startPress(e, slot)}
       >
         <div class="top">
-          <span class="name num">{slot.fileName.replace(".wav", "")}</span>
+          <span class="id">
+            {#if spot}
+              <span
+                class="spot"
+                title="Reel {spot.position + 1} of {spot.count} in Reel mode: {spot.colour.name}, Organize near {spot.clock}"
+              >
+                <i class="dot" style:background={spot.colour.css}></i>
+                <svg class="dial" viewBox="-8 -8 16 16" aria-hidden="true">
+                  <circle r="7" />
+                  <line x2="0" y2="-6" transform="rotate({spot.angle})" />
+                </svg>
+              </span>
+            {/if}
+            <span class="name num">{slot.fileName.replace(".wav", "")}</span>
+          </span>
           {#if slot.present}
             <span class="num">{formatTime(slot.frames)}</span>
           {/if}
         </div>
 
         {#if slot.present}
+          <input
+            class="label"
+            value={slot.name}
+            placeholder="Name"
+            maxlength="80"
+            disabled={busy}
+            onchange={(e) => saveLabel(slot, "name", e.currentTarget)}
+            onkeydown={(e) => labelKey(e, slot, "name")}
+          />
+          <input
+            class="label note"
+            value={slot.note}
+            placeholder="Note"
+            maxlength="300"
+            disabled={busy}
+            onchange={(e) => saveLabel(slot, "note", e.currentTarget)}
+            onkeydown={(e) => labelKey(e, slot, "note")}
+          />
           <div class="bar" title="Length against the 2.9 minute limit, with splice markers">
             <div class="fill" style:width="{Math.min(1, slot.frames / MAX_FRAMES) * 100}%">
               {#each slot.markers as m}
@@ -353,6 +491,13 @@
             <div class="error small">{problem}</div>
           {/each}
           <div class="buttons">
+            <button
+              onclick={() => togglePlay(slot)}
+              disabled={busy || !slot.formatOk}
+              title={slot.formatOk ? "Play the reel from its start" : "Convert it to play it here"}
+            >
+              {playing === slot.index ? "Stop" : "Play"}
+            </button>
             {#if slot.convertible}
               <button onclick={() => convert(slot)} disabled={busy} title="Rewrite it as 48 kHz 32-bit float stereo, keeping its markers">
                 Convert
@@ -488,6 +633,45 @@
   .name {
     font-weight: 700;
     font-size: 15px;
+  }
+  .id {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .spot {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    box-shadow: 0 0 0 1px var(--line);
+  }
+  .dial {
+    width: 14px;
+    height: 14px;
+  }
+  .dial circle {
+    fill: none;
+    stroke: var(--line);
+    stroke-width: 1.5;
+  }
+  .dial line {
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+  }
+  .label {
+    font-size: 12px;
+    padding: 2px 6px;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .label.note {
+    font-size: 11px;
   }
   .bar {
     height: 10px;
