@@ -16,6 +16,15 @@
   --danger: #b3261e;
   --ok: #2e7d4f;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  /* Spacing and type scales. */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --t-small: 12px;
+  --t-label: 13px;
+  --t-title: 18px;
   color-scheme: light dark;
 }
 
@@ -116,4 +125,78 @@ textarea {
 
 .error {
   color: var(--danger);
+}
+
+.small {
+  font-size: var(--t-small);
+}
+
+/* A tab's top row: what it is on the left, its actions on the right with the
+   main one last. The actions drop under the text when the window is narrow. */
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s3);
+  margin-bottom: var(--s3);
+}
+.page-header p {
+  margin: 0;
+  min-width: 0;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: var(--s2) var(--s3);
+  margin-bottom: var(--s3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+.panel h3 {
+  margin: 0;
+  font-size: var(--t-label);
+}
+
+/* A labelled value: label text, the input, its unit. */
+.field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  white-space: nowrap;
+}
+.field input[type="number"] {
+  width: 64px;
+}
+
+/* Segmented buttons that switch between views. */
+.tabs-inline {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--panel-2);
+  border-radius: 7px;
+}
+.tabs-inline button {
+  flex: 1;
+  white-space: nowrap;
+  background: transparent;
+  border-color: transparent;
+  padding: 3px 8px;
+  font-size: var(--t-label);
+}
+.tabs-inline button.active {
+  background: var(--panel);
+  border-color: var(--line);
+  font-weight: 600;
 }
