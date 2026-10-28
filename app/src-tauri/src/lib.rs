@@ -8,7 +8,7 @@ use mgreel_core::marker_files;
 use mgreel_core::names::ReelLabel;
 use mgreel_core::options::{self, Kind, OptionsFile};
 use mgreel_core::reel::{self, Problem};
-use mgreel_core::riff::{self, Format};
+use mgreel_core::riff;
 use mgreel_core::sets;
 use mgreel_core::slice;
 use mgreel_core::{BuildOptions, Clip, Reel, ReelFile};
@@ -1153,31 +1153,14 @@ async fn probe_sources(paths: Vec<String>) -> Vec<SourceDto> {
 
 /// A source's length and markers at 48 kHz, read without decoding it.
 fn probe(path: &Path) -> anyhow::Result<(u32, Vec<u32>)> {
-    use anyhow::Context;
-    let chunks = riff::scan_file(path)?;
-    let find = |id: &[u8; 4]| chunks.iter().find(|c| &c.id == id);
-    let format = Format::parse(&riff::read_chunk(
-        path,
-        find(b"fmt ").context("no fmt chunk")?,
-    )?)?;
+    let scan = riff::scan_source(path)?;
+    let format = scan.format;
     if format.channels == 0 || format.channels > 2 {
         anyhow::bail!("{} channels; only mono and stereo work", format.channels);
     }
-    let frames = find(b"data").map_or(0, |c| c.size as u64) / format.frame_bytes().max(1) as u64;
+    let frames = scan.data_bytes / format.frame_bytes().max(1) as u64;
     let frames = (frames * reel::SAMPLE_RATE as u64 / format.sample_rate.max(1) as u64) as u32;
-    let cue = find(b"cue ")
-        .map(|c| riff::read_chunk(path, c))
-        .transpose()?;
-    let lists = chunks
-        .iter()
-        .filter(|c| &c.id == b"LIST")
-        .map(|c| riff::read_chunk(path, c))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let lists: Vec<&[u8]> = lists.iter().map(Vec::as_slice).collect();
-    let markers = reel::rescale_markers(
-        &riff::source_markers(cue.as_deref(), &lists),
-        format.sample_rate,
-    );
+    let markers = reel::rescale_markers(&scan.markers, format.sample_rate);
     Ok((frames, reel::clean_markers(markers, frames)))
 }
 

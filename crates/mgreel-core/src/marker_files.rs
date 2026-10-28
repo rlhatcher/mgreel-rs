@@ -2,7 +2,8 @@
 //! Audacity label files, REAPER marker and region exports, Ableton Live
 //! sets, and the cue points and region ends in a WAV file.
 
-use crate::reel::{clean_markers, ReelFile, SAMPLE_RATE};
+use crate::reel::{clean_markers, SAMPLE_RATE};
+use crate::riff;
 use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
 use quick_xml::events::{BytesStart, Event};
@@ -44,7 +45,7 @@ pub fn read(path: &Path) -> Result<MarkerTimes> {
             ableton(file)?
         }
         "wav" | "wave" => MarkerTimes {
-            seconds: wav(&ReelFile::open(path)?)?,
+            seconds: wav(path)?,
             warnings: Vec::new(),
         },
         _ => bail!(
@@ -280,16 +281,18 @@ pub fn ableton(file: impl Read) -> Result<MarkerTimes> {
     })
 }
 
-/// A WAV file's cue points and region ends, in seconds.
-pub fn wav(file: &ReelFile) -> Result<Vec<f64>> {
-    let rate = file.format()?.sample_rate;
+/// A WAV file's cue points and region ends, in seconds. Reads only the
+/// chunks that hold them, not the audio.
+pub fn wav(path: &Path) -> Result<Vec<f64>> {
+    let scan = riff::scan_source(path)?;
+    let rate = scan.format.sample_rate;
     if rate == 0 {
         bail!("the file's sample rate is 0");
     }
-    Ok(file
-        .source_markers()
-        .into_iter()
-        .map(|m| m as f64 / rate as f64)
+    Ok(scan
+        .markers
+        .iter()
+        .map(|&m| m as f64 / rate as f64)
         .collect())
 }
 
@@ -372,6 +375,20 @@ mod tests {
         assert_eq!(times.warnings.len(), 1);
 
         assert!(ableton(&b"not gzip"[..]).is_err());
+    }
+
+    #[test]
+    fn wav_cue_points_in_seconds() {
+        let reel = crate::Reel {
+            left: vec![0.0; 48_000],
+            right: vec![0.0; 48_000],
+            markers: vec![12_000, 36_000],
+        };
+        let path = std::env::temp_dir().join(format!("mgreel-cues-{}.wav", std::process::id()));
+        std::fs::write(&path, reel.to_wav_bytes().unwrap()).unwrap();
+        let times = read(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(times.unwrap().seconds, vec![0.25, 0.75]);
     }
 
     #[test]

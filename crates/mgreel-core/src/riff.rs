@@ -95,6 +95,36 @@ pub fn scan_file(path: &Path) -> Result<Vec<ChunkInfo>> {
     Ok(infos)
 }
 
+/// What [`scan_source`] reads from a WAV file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceScan {
+    pub format: Format,
+    /// The size of the audio, in bytes.
+    pub data_bytes: u64,
+    /// The file's [`source_markers`], at its own rate.
+    pub markers: Vec<u32>,
+}
+
+/// A WAV file's format, audio size and [`source_markers`], read from the
+/// chunk headers and the small chunks only, so the audio stays on disk.
+pub fn scan_source(path: &Path) -> Result<SourceScan> {
+    let chunks = scan_file(path)?;
+    let find = |id: &[u8; 4]| chunks.iter().find(|c| &c.id == id);
+    let format = Format::parse(&read_chunk(path, find(b"fmt ").context("no fmt chunk")?)?)?;
+    let cue = find(b"cue ").map(|c| read_chunk(path, c)).transpose()?;
+    let lists = chunks
+        .iter()
+        .filter(|c| &c.id == b"LIST")
+        .map(|c| read_chunk(path, c))
+        .collect::<Result<Vec<_>>>()?;
+    let lists: Vec<&[u8]> = lists.iter().map(Vec::as_slice).collect();
+    Ok(SourceScan {
+        format,
+        data_bytes: find(b"data").map_or(0, |c| c.size as u64),
+        markers: source_markers(cue.as_deref(), &lists),
+    })
+}
+
 pub fn read_chunk(path: &Path, info: &ChunkInfo) -> Result<Vec<u8>> {
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(info.offset))?;
