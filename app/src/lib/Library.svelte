@@ -58,6 +58,7 @@
         check.namesError !== null),
   );
   const spots = $derived(reelSpots(slots));
+  const cardName = $derived(root.split("/").pop() || root);
 
   // Look the card over whenever it or its slots change.
   /** The card the shown check belongs to. */
@@ -132,9 +133,62 @@
   let dropOn = $state<number | null>(null);
 
   function startPress(e: PointerEvent, slot: Slot) {
-    if (e.button !== 0 || !slot.present || busy) return;
-    if ((e.target as Element).closest("button, input")) return;
+    if (e.button !== 0) return;
+    const onControl = !!(e.target as Element).closest("button, input");
+    pick(slot.index, onControl);
+    if (!slot.present || busy || onControl) return;
     press = { index: slot.index, x: e.clientX, y: e.clientY };
+  }
+
+  /** The slot picked in the list; the toolbar acts on it. */
+  let selected = $state<number | null>(null);
+  const sel = $derived(selected === null ? null : (slots[selected] ?? null));
+  /** The last press on a row, to tell a double-click. */
+  let lastPress = { index: -1, at: 0 };
+
+  function pick(index: number, onControl: boolean) {
+    const now = performance.now();
+    const again = !onControl && lastPress.index === index && now - lastPress.at < 400;
+    lastPress = { index, at: onControl ? 0 : now };
+    selected = index;
+    if (again) openSlot(index);
+  }
+
+  /** How many tiles sit in a row of the grid now. */
+  function columns() {
+    const grid = document.querySelector("ol.grid");
+    if (!grid) return 1;
+    return getComputedStyle(grid).gridTemplateColumns.split(" ").filter(Boolean).length || 1;
+  }
+
+  /** Edit a reel, or build one into an empty slot. */
+  function openSlot(index: number) {
+    const slot = slots[index];
+    if (!slot || busy) return;
+    if (slot.present) onedit(index);
+    else onbuild(index);
+  }
+
+  function onKey(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      cancelDrag();
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // Keys typed into a field or pressed on a button are theirs.
+    if ((e.target as Element | null)?.closest?.("input, textarea, select, button")) return;
+    const across = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+    const down = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0;
+    if (across || down) {
+      e.preventDefault();
+      const step = across || down * columns();
+      const next = selected === null ? 0 : Math.max(0, Math.min(slots.length - 1, selected + step));
+      selected = next;
+      document.querySelector(`li[data-slot="${next}"]`)?.scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Enter" && selected !== null) {
+      e.preventDefault();
+      openSlot(selected);
+    }
   }
 
   function onPointerMove(e: PointerEvent) {
@@ -158,6 +212,8 @@
     const to = dropOn;
     cancelDrag();
     if (from === null || to === null || from === to) return;
+    // The picked reel goes with it.
+    selected = to;
     // Option-drop swaps; a plain drop inserts and shifts the slots between.
     if (e.altKey) {
       run((card) => swapSlots(card, from, to), `Swapped ${slots[from].fileName} and ${slots[to].fileName}`);
@@ -299,6 +355,7 @@
     return () => {
       stopPlaying();
       history = null;
+      selected = null;
     };
   });
 
@@ -392,20 +449,17 @@
   onpointermove={onPointerMove}
   onpointerup={onPointerUp}
   onpointercancel={cancelDrag}
-  onkeydown={(e) => e.key === "Escape" && cancelDrag()}
+  onkeydown={onKey}
 />
 
 <section>
-  <header>
-    <p class="muted">
-      {used} of 32 slots used. Drag a reel to move it; hold Option while dropping to swap. The dot is the
-      reel's colour in Reel mode, and the dial is about where Organize selects it.
-    </p>
+  <header class="page-header">
+    <p><strong>{cardName}</strong> <span class="muted">· {used} of 32 slots used</span></p>
     <div class="actions">
       <button onclick={backup} disabled={busy}>Back up card</button>
       <button onclick={restore} disabled={busy}>Restore…</button>
       <button onclick={toggleHistory} class:active={history !== null}>History</button>
-      <button onclick={reveal}>Show backups</button>
+      <button onclick={reveal} title="Open this card's backups folder">Show in Finder</button>
       {#if mounted}
         <button onclick={eject} disabled={busy} title="Unmount the card so you can take it out">Eject</button>
       {/if}
@@ -489,6 +543,28 @@
     </div>
   {/if}
 
+  <div class="toolbar">
+    {#if sel?.present}
+      <span class="picked"><strong class="num">{sel.fileName.replace(".wav", "")}</strong> {sel.name}</span>
+      <div class="actions">
+        <button onclick={() => onbuild(sel.index)} disabled={busy} title="Build a new reel into this slot">Replace…</button>
+        {#if sel.convertible}
+          <button onclick={() => convert(sel)} disabled={busy} title="Rewrite it as 48 kHz 32-bit float stereo, keeping its markers">
+            Convert
+          </button>
+        {/if}
+        <button class="danger" onclick={() => clear(sel)} disabled={busy}>Remove</button>
+      </div>
+    {:else if sel}
+      <span class="picked"><strong class="num">{sel.fileName.replace(".wav", "")}</strong> <span class="muted">empty</span></span>
+      <span class="muted small">Build a reel here with the tile's Build button.</span>
+    {:else}
+      <span class="muted small">
+        Pick a tile for more actions. Drag a reel to move it, Option-drag to swap.
+      </span>
+    {/if}
+  </div>
+
   <ol class="grid">
     {#each slots as slot (slot.index)}
       {@const spot = spots.get(slot.index)}
@@ -496,6 +572,7 @@
         class="slot"
         class:empty={!slot.present}
         class:bad={slot.problems.length > 0}
+        class:selected={selected === slot.index}
         class:movable={slot.present && !busy}
         class:dragging={dragFrom === slot.index}
         class:target={dropOn === slot.index && dragFrom !== null && dragFrom !== slot.index}
@@ -517,6 +594,9 @@
               </span>
             {/if}
             <span class="name num">{slot.fileName.replace(".wav", "")}</span>
+            {#if slot.problems.length}
+              <span class="problem" title={slot.problems.join("\n")}>!</span>
+            {/if}
           </span>
           {#if slot.present}
             <span class="num">{formatTime(slot.frames)}</span>
@@ -554,9 +634,6 @@
           <div class="meta muted">
             {slot.markers.length + 1} splice{slot.markers.length ? "s" : ""}
           </div>
-          {#each slot.problems as problem}
-            <div class="error small">{problem}</div>
-          {/each}
           <div class="buttons">
             <button
               onclick={() => togglePlay(slot)}
@@ -565,19 +642,12 @@
             >
               {playing === slot.index ? "Stop" : "Play"}
             </button>
-            {#if slot.convertible}
-              <button onclick={() => convert(slot)} disabled={busy} title="Rewrite it as 48 kHz 32-bit float stereo, keeping its markers">
-                Convert
-              </button>
-            {/if}
-            <button onclick={() => onedit(slot.index)} disabled={busy}>Edit</button>
-            <button onclick={() => onbuild(slot.index)} disabled={busy}>Replace</button>
-            <button class="danger" onclick={() => clear(slot)} disabled={busy}>Remove</button>
+            <button onclick={() => onedit(slot.index)} disabled={busy} title="Edit the splices">Edit</button>
           </div>
         {:else}
           <div class="meta muted">Empty</div>
           <div class="buttons">
-            <button onclick={() => onbuild(slot.index)} disabled={busy}>Build reel here</button>
+            <button onclick={() => onbuild(slot.index)} disabled={busy} title="Build a reel into this slot">Build</button>
           </div>
         {/if}
       </li>
@@ -586,20 +656,24 @@
 </section>
 
 <style>
-  header {
+  .toolbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
     flex-wrap: wrap;
-    margin-bottom: 14px;
+    gap: var(--s2) var(--s3);
+    min-height: 36px;
+    padding: var(--s1) var(--s3);
+    margin-bottom: var(--s2);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
   }
-  header p {
-    margin: 0;
-  }
-  .actions {
-    display: flex;
-    gap: 8px;
+  .picked {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .grid {
     list-style: none;
@@ -609,6 +683,7 @@
     grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
     gap: 10px;
   }
+  /* Every tile has the same parts, so a row of tiles lines up. */
   .slot {
     background: var(--panel);
     border: 1px solid var(--line);
@@ -617,31 +692,77 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    min-height: 128px;
-  }
-  .slot {
+    min-height: 150px;
     user-select: none;
     -webkit-user-select: none;
   }
   .slot.movable {
     cursor: grab;
   }
+  .slot.selected {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
   .slot.dragging {
     opacity: 0.5;
   }
-  .panel {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 10px 12px;
-    margin-bottom: 14px;
+  .slot.empty {
+    background: transparent;
+    border-style: dashed;
+  }
+  .slot.empty.selected {
+    border-style: solid;
+  }
+  .slot.bad:not(.selected) {
+    border-color: var(--danger);
+  }
+  .slot.target {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .top {
     display: flex;
-    flex-direction: column;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .id {
+    display: flex;
+    align-items: center;
     gap: 6px;
   }
-  .panel h3 {
-    margin: 0;
-    font-size: 13px;
+  .spot {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .name {
+    font-weight: 700;
+    font-size: 15px;
+  }
+  .meta {
+    font-size: var(--t-small);
+  }
+  .buttons {
+    margin-top: auto;
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .buttons button {
+    padding: 2px 10px;
+    font-size: var(--t-small);
+  }
+  .problem {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--danger);
+    color: var(--panel);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 16px;
+    text-align: center;
   }
   .panel p {
     margin: 0;
@@ -681,36 +802,7 @@
   .actions button.active {
     background: var(--panel-2);
   }
-  .slot.empty {
-    background: transparent;
-    border-style: dashed;
-  }
-  .slot.bad {
-    border-color: var(--danger);
-  }
-  .slot.target {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
-  }
-  .top {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-  }
-  .name {
-    font-weight: 700;
-    font-size: 15px;
-  }
-  .id {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .spot {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
+
   .dot {
     width: 10px;
     height: 10px;
@@ -737,9 +829,7 @@
     user-select: text;
     -webkit-user-select: text;
   }
-  .label.note {
-    font-size: 11px;
-  }
+
   .bar {
     height: 10px;
     background: var(--panel-2);
@@ -758,18 +848,5 @@
     width: 1px;
     background: var(--marker);
   }
-  .meta,
-  .small {
-    font-size: 12px;
-  }
-  .buttons {
-    margin-top: auto;
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-  }
-  .buttons button {
-    padding: 2px 8px;
-    font-size: 12px;
-  }
+
 </style>
