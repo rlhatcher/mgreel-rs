@@ -56,16 +56,17 @@
       firmware MG155 or later.
     </p>
   {:else}
-    <header>
-      <p class="muted">
-        {#if options.firmware}Written by firmware {options.firmware}.{/if}
-        0 is the default for every choice. Only the value changes; the comments the Morphagene wrote stay as they are.
+    <header class="page-header">
+      <p class="muted" title="Only the value changes; the comments the Morphagene wrote stay as they are.">
+        {#if options.firmware}Written by firmware {options.firmware}.{/if} 0 is the default for every choice.
       </p>
-      <label><input type="checkbox" bind:checked={raw} /> Edit as text</label>
-      <button onclick={load} disabled={!dirty || saving}>Revert</button>
-      <button class="primary" onclick={saveAll} disabled={!dirty || saving}>
-        {saving ? "Saving…" : "Save to card"}
-      </button>
+      <div class="actions">
+        <label class="field"><input type="checkbox" bind:checked={raw} /> Edit as text</label>
+        <button onclick={load} disabled={!dirty || saving}>Revert</button>
+        <button class="primary" onclick={saveAll} disabled={!dirty || saving}>
+          {saving ? "Saving…" : "Save to card"}
+        </button>
+      </div>
     </header>
 
     {#if raw}
@@ -110,21 +111,6 @@
 </section>
 
 <style>
-  header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 14px;
-  }
-  header p {
-    margin: 0;
-    flex: 1;
-  }
-  header label {
-    display: flex;
-    gap: 4px;
-    align-items: center;
-  }
   .grid {
     display: grid;
     gap: 6px;
@@ -145,11 +131,8 @@
   .name {
     font-weight: 600;
   }
-  .small {
-    font-size: 12px;
-  }
-  select,
-  input {
+  .row select,
+  .row input {
     width: 100%;
   }
   textarea {

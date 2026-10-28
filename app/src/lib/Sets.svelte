@@ -122,12 +122,18 @@
 </script>
 
 <section>
-  <header>
-    <p class="muted">
-      A set is a whole card kept in Music/Morphagene Sets: its reels, options.txt and reel names. Loading one
-      backs the card up, then replaces everything on it.
+  <header class="page-header">
+    <p
+      class="muted"
+      title="Each set keeps a card's reels, options.txt and reel names. Loading one backs the card up, then replaces everything on it."
+    >
+      Whole cards kept in Music/Morphagene Sets.
     </p>
     <div class="actions">
+      <button onclick={importFolder} disabled={busy} title="Make a set from a folder of WAV files, such as a reel pack">
+        Import folder…
+      </button>
+      <button onclick={() => reveal()}>Show in Finder</button>
       <form onsubmit={save}>
         <input
           bind:value={saveName}
@@ -136,12 +142,8 @@
           disabled={!root || busy}
           title={root ? "" : "Open a card to save it as a set"}
         />
-        <button type="submit" disabled={!root || busy || !saveName.trim()}>Save card as set</button>
+        <button class="primary" type="submit" disabled={!root || busy || !saveName.trim()}>Save card as set</button>
       </form>
-      <button onclick={importFolder} disabled={busy} title="Make a set from a folder of WAV files, such as a reel pack">
-        Import folder…
-      </button>
-      <button onclick={() => reveal()}>Show in Finder</button>
     </div>
   </header>
 
@@ -194,7 +196,7 @@
             >
               Load onto card
             </button>
-            <button onclick={() => reveal(set.dir)}>Show</button>
+            <button onclick={() => reveal(set.dir)}>Show in Finder</button>
           </div>
         </li>
       {/each}
@@ -203,32 +205,11 @@
 </section>
 
 <style>
-  header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin-bottom: 14px;
-  }
-  header p {
-    margin: 0;
-    max-width: 520px;
-  }
-  .actions,
   form {
     display: flex;
-    gap: 8px;
+    gap: var(--s2);
   }
   .panel {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 10px 12px;
-    margin-bottom: 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
     max-height: 280px;
     overflow: auto;
   }
@@ -236,10 +217,6 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-  }
-  .panel h3 {
-    margin: 0;
-    font-size: 13px;
   }
   ul {
     list-style: none;
@@ -269,8 +246,5 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .small {
-    font-size: 12px;
   }
 </style>
