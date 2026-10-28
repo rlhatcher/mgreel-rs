@@ -1,5 +1,9 @@
 # Builds the macOS app when a version tag is pushed, attaches the DMG to a
 # GitHub release, then points the cask in Casks/ at the new release.
+#
+# The build runs npm packages and build scripts, so it gets a read-only token
+# that isn't kept in git's config. Only the publish job can write, and it
+# runs no third-party code.
 name: Release
 
 on:
@@ -7,14 +11,16 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  macos:
+  build:
     # Apple Silicon. The app is ad-hoc signed, not notarized.
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v5
         with:
@@ -41,35 +47,95 @@ jobs:
         working-directory: app
         run: npm run tauri build -- --bundles dmg
 
-      - name: Publish
-        id: publish
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Name the DMG
         run: |
           version="${GITHUB_REF_NAME#v}"
           # GitHub turns spaces in asset names into dots, so give it a fixed name.
-          dmg="Morphagene-Reels-$version-arm64.dmg"
-          cp "target/release/bundle/dmg/Morphagene Reels_${version}_aarch64.dmg" "$dmg"
-          gh release create "$GITHUB_REF_NAME" "$dmg" --title "$GITHUB_REF_NAME" --generate-notes
-          echo "sha256=$(shasum -a 256 "$dmg" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          mkdir dist
+          cp "target/release/bundle/dmg/Morphagene Reels_${version}_aarch64.dmg" \
+            "dist/Morphagene-Reels-$version-arm64.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmg
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # One cask update at a time, so two releases can't race on main.
+    concurrency:
+      group: cask-update
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dmg
+          path: dist
+
+      - name: Publish the release
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          dmg="Morphagene-Reels-${GITHUB_REF_NAME#v}-arm64.dmg"
+          # Safe to rerun: an existing release is reused, and a DMG already
+          # attached to it is kept, so the cask gets the sha256 of the file
+          # people download.
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          fi
+          if gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | grep -qxF "$dmg"; then
+            mkdir published
+            gh release download "$GITHUB_REF_NAME" --pattern "$dmg" --dir published
+            file="published/$dmg"
+          else
+            gh release upload "$GITHUB_REF_NAME" "dist/$dmg"
+            file="dist/$dmg"
+          fi
+          echo "sha256=$(sha256sum "$file" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          path: repo
 
       - name: Point the cask at the release
+        working-directory: repo
         env:
           SHA256: ${{ steps.publish.outputs.sha256 }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          # The tag may be behind main, so update the cask on main itself.
-          git fetch origin main:refs/remotes/origin/main
-          git switch --create cask-update origin/main
-          sed -i '' -E \
-            -e "s/^  version \".*\"$/  version \"$version\"/" \
-            -e "s/^  sha256 \".*\"$/  sha256 \"$SHA256\"/" \
-            Casks/morphagene-reels.rb
-          if git diff --quiet; then
-            echo "The cask already points at $version."
-            exit 0
-          fi
+          cask=Casks/morphagene-reels.rb
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "Point the cask at $GITHUB_REF_NAME"
-          git push origin HEAD:main
+          for attempt in 1 2 3; do
+            current=$(sed -nE 's/^  version "(.*)"$/\1/p' "$cask")
+            # Only move forward: a late older release mustn't replace a newer one.
+            newest=$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -n 1)
+            if [ "$newest" != "$version" ]; then
+              echo "The cask is at $current, newer than $version. Leaving it."
+              exit 0
+            fi
+            sed -i -E \
+              -e "s/^  version \".*\"$/  version \"$version\"/" \
+              -e "s/^  sha256 \".*\"$/  sha256 \"$SHA256\"/" \
+              "$cask"
+            if git diff --quiet; then
+              echo "The cask already points at $version."
+              exit 0
+            fi
+            git commit -qam "Point the cask at $GITHUB_REF_NAME"
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            # Someone pushed to main meanwhile: start again from the new main.
+            git fetch origin main
+            git reset -q --hard origin/main
+          done
+          echo "Couldn't push the cask update to main."
+          exit 1

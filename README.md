@@ -50,12 +50,15 @@ Anyway.
 ### Releasing
 
 1. Set the same version in `Cargo.toml` (workspace), `app/package.json` and
-   `app/src-tauri/tauri.conf.json`.
-2. Commit, then tag and push: `git tag v1.2.0 && git push origin v1.2.0`.
+   `app/src-tauri/tauri.conf.json`, commit it and push it to `main`.
+2. Tag that commit and push the tag:
+   `git tag v1.2.0 && git push origin v1.2.0`.
 3. The Release workflow builds the DMG and attaches it to a new GitHub
    release. It fails if the tag doesn't match the version in
    `tauri.conf.json`. Then it commits the new version and sha256 to
-   `Casks/morphagene-reels.rb` on `main`, so `brew upgrade` picks it up.
+   `Casks/morphagene-reels.rb` on `main`, so `brew upgrade` picks it up. A
+   failed run can be rerun; an older release never replaces a newer one in
+   the cask.
 
 ## Layout
 
