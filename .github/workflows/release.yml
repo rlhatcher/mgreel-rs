@@ -1,0 +1,75 @@
+# Builds the macOS app when a version tag is pushed, attaches the DMG to a
+# GitHub release, then points the cask in Casks/ at the new release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    # Apple Silicon. The app is ad-hoc signed, not notarized.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Update Rust
+        run: rustup update stable && rustup default stable
+
+      - name: Check the tag matches the app version
+        run: |
+          version=$(node -p "require('./app/src-tauri/tauri.conf.json').version")
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "The tag $GITHUB_REF_NAME doesn't match the app version $version in tauri.conf.json."
+            exit 1
+          fi
+
+      - name: Install the frontend's packages
+        working-directory: app
+        run: npm ci
+
+      - name: Build the DMG
+        working-directory: app
+        run: npm run tauri build -- --bundles dmg
+
+      - name: Publish
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # GitHub turns spaces in asset names into dots, so give it a fixed name.
+          dmg="Morphagene-Reels-$version-arm64.dmg"
+          cp "target/release/bundle/dmg/Morphagene Reels_${version}_aarch64.dmg" "$dmg"
+          gh release create "$GITHUB_REF_NAME" "$dmg" --title "$GITHUB_REF_NAME" --generate-notes
+          echo "sha256=$(shasum -a 256 "$dmg" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Point the cask at the release
+        env:
+          SHA256: ${{ steps.publish.outputs.sha256 }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # The tag may be behind main, so update the cask on main itself.
+          git fetch origin main:refs/remotes/origin/main
+          git switch --create cask-update origin/main
+          sed -i '' -E \
+            -e "s/^  version \".*\"$/  version \"$version\"/" \
+            -e "s/^  sha256 \".*\"$/  sha256 \"$SHA256\"/" \
+            Casks/morphagene-reels.rb
+          if git diff --quiet; then
+            echo "The cask already points at $version."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Point the cask at $GITHUB_REF_NAME"
+          git push origin HEAD:main
