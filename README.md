@@ -37,7 +37,7 @@ With Homebrew, on an Apple Silicon Mac:
 
 ```bash
 brew tap rlhatcher/mgreel https://github.com/rlhatcher/mgreel-rs
-brew trust rlhatcher/mgreel
+brew trust --cask rlhatcher/mgreel/morphagene-reels
 brew install --cask rlhatcher/mgreel/morphagene-reels
 ```
 
