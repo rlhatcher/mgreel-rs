@@ -31,6 +31,32 @@ cargo install --locked --git https://github.com/rlhatcher/mgreel-rs.git mgreel-r
 
 Or `cargo install --locked --path crates/mgreel-cli` from a checkout.
 
+### The app
+
+With Homebrew, on an Apple Silicon Mac:
+
+```bash
+brew tap rlhatcher/mgreel https://github.com/rlhatcher/mgreel-rs
+brew trust rlhatcher/mgreel
+brew install --cask rlhatcher/mgreel/morphagene-reels
+```
+
+The app is ad-hoc signed, not notarized. The cask clears the quarantine flag
+Homebrew sets, so it opens without a warning. Each release on GitHub also has
+`Morphagene-Reels-<version>-arm64.dmg`; installed from that, macOS blocks the
+first launch until you allow it in System Settings, Privacy & Security, Open
+Anyway.
+
+### Releasing
+
+1. Set the same version in `Cargo.toml` (workspace), `app/package.json` and
+   `app/src-tauri/tauri.conf.json`.
+2. Commit, then tag and push: `git tag v1.2.0 && git push origin v1.2.0`.
+3. The Release workflow builds the DMG and attaches it to a new GitHub
+   release. It fails if the tag doesn't match the version in
+   `tauri.conf.json`. Then it commits the new version and sha256 to
+   `Casks/morphagene-reels.rb` on `main`, so `brew upgrade` picks it up.
+
 ## Layout
 
 The repo is a Cargo workspace:
