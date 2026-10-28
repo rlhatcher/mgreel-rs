@@ -33,6 +33,12 @@ jobs:
 
       - name: Check the tag matches the app version
         run: |
+          # The cask compares versions by sorting them, which puts 1.2.0-rc.1
+          # after 1.2.0, so only stable versions are released.
+          if ! printf '%s\n' "$GITHUB_REF_NAME" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Release tags look like v1.2.0. $GITHUB_REF_NAME isn't one, so nothing is released."
+            exit 1
+          fi
           version=$(node -p "require('./app/src-tauri/tauri.conf.json').version")
           if [ "$GITHUB_REF_NAME" != "v$version" ]; then
             echo "The tag $GITHUB_REF_NAME doesn't match the app version $version in tauri.conf.json."
@@ -66,10 +72,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    # One cask update at a time, so two releases can't race on main.
+    # One cask update at a time, so two releases can't race on main. Every
+    # waiting release keeps its place instead of the newest cancelling it.
     concurrency:
       group: cask-update
       cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/download-artifact@v4
         with:
