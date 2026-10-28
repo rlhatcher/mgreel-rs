@@ -112,17 +112,33 @@ pub fn scan_source(path: &Path) -> Result<SourceScan> {
     let find = |id: &[u8; 4]| chunks.iter().find(|c| &c.id == id);
     let format = Format::parse(&read_chunk(path, find(b"fmt ").context("no fmt chunk")?)?)?;
     let cue = find(b"cue ").map(|c| read_chunk(path, c)).transpose()?;
-    let lists = chunks
-        .iter()
-        .filter(|c| &c.id == b"LIST")
-        .map(|c| read_chunk(path, c))
-        .collect::<Result<Vec<_>>>()?;
+    // Only `adtl` lists hold regions. Others can be large, such as a
+    // `wavl` list that holds audio, so check the list type first.
+    let mut lists = Vec::new();
+    for list in chunks.iter().filter(|c| &c.id == b"LIST") {
+        if list_type(path, list)? == Some(*b"adtl") {
+            lists.push(read_chunk(path, list)?);
+        }
+    }
     let lists: Vec<&[u8]> = lists.iter().map(Vec::as_slice).collect();
     Ok(SourceScan {
         format,
         data_bytes: find(b"data").map_or(0, |c| c.size as u64),
         markers: source_markers(cue.as_deref(), &lists),
     })
+}
+
+/// The four-byte type at the start of a `LIST` chunk, without reading the
+/// rest. None when the chunk is too short to have one.
+fn list_type(path: &Path, info: &ChunkInfo) -> Result<Option<[u8; 4]>> {
+    if info.size < 4 {
+        return Ok(None);
+    }
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(info.offset))?;
+    let mut kind = [0u8; 4];
+    file.read_exact(&mut kind)?;
+    Ok(Some(kind))
 }
 
 pub fn read_chunk(path: &Path, info: &ChunkInfo) -> Result<Vec<u8>> {
@@ -285,6 +301,55 @@ mod tests {
             out.push(0);
         }
         out
+    }
+
+    #[test]
+    fn scan_source_reads_regions_from_adtl_lists_only() {
+        let fmt = Chunk {
+            id: *b"fmt ",
+            data: [
+                &1u16.to_le_bytes()[..],
+                &1u16.to_le_bytes(),
+                &8_000u32.to_le_bytes(),
+                &16_000u32.to_le_bytes(),
+                &2u16.to_le_bytes(),
+                &16u16.to_le_bytes(),
+            ]
+            .concat(),
+        };
+        let mut ltxt = 1u32.to_le_bytes().to_vec();
+        ltxt.extend_from_slice(&50u32.to_le_bytes());
+        ltxt.extend_from_slice(&[0; 12]);
+        let adtl = [&b"adtl"[..], &sub(b"ltxt", &ltxt)].concat();
+        let chunks = vec![
+            fmt,
+            encode_cues(&[100]),
+            Chunk {
+                id: *b"LIST",
+                data: b"INFOISFT".to_vec(),
+            },
+            // Too short to have a list type.
+            Chunk {
+                id: *b"LIST",
+                data: b"ad".to_vec(),
+            },
+            Chunk {
+                id: *b"LIST",
+                data: adtl,
+            },
+            Chunk {
+                id: *b"data",
+                data: vec![0; 1_000],
+            },
+        ];
+        let path = std::env::temp_dir().join(format!("mgreel-scan-{}.wav", std::process::id()));
+        std::fs::write(&path, serialize(&chunks)).unwrap();
+        let scan = scan_source(&path);
+        std::fs::remove_file(&path).unwrap();
+        let scan = scan.unwrap();
+        assert_eq!(scan.format.sample_rate, 8_000);
+        assert_eq!(scan.data_bytes, 1_000);
+        assert_eq!(scan.markers, vec![100, 150]);
     }
 
     #[test]
