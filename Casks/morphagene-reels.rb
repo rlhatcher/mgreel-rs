@@ -1,6 +1,6 @@
 # The app from this repo, so the repo works as a Homebrew tap:
 #   brew tap rlhatcher/mgreel https://github.com/rlhatcher/mgreel-rs
-#   brew trust rlhatcher/mgreel
+#   brew trust --cask rlhatcher/mgreel/morphagene-reels
 #   brew install --cask rlhatcher/mgreel/morphagene-reels
 # The Release workflow sets version and sha256 after each release.
 cask "morphagene-reels" do
