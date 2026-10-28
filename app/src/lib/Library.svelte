@@ -134,8 +134,8 @@
 
   function startPress(e: PointerEvent, slot: Slot) {
     if (e.button !== 0) return;
+    selected = slot.index;
     const onControl = !!(e.target as Element).closest("button, input");
-    pick(slot.index, onControl);
     if (!slot.present || busy || onControl) return;
     press = { index: slot.index, x: e.clientX, y: e.clientY };
   }
@@ -143,15 +143,14 @@
   /** The slot picked in the list; the toolbar acts on it. */
   let selected = $state<number | null>(null);
   const sel = $derived(selected === null ? null : (slots[selected] ?? null));
-  /** The last press on a row, to tell a double-click. */
-  let lastPress = { index: -1, at: 0 };
-
-  function pick(index: number, onControl: boolean) {
-    const now = performance.now();
-    const again = !onControl && lastPress.index === index && now - lastPress.at < 400;
-    lastPress = { index, at: onControl ? 0 : now };
-    selected = index;
-    if (again) openSlot(index);
+  /**
+   * A double-click opens the tile. The browser sends it only once both
+   * clicks are done, so pressing twice to start a drag doesn't open it, and
+   * a double-click in the name or note selects a word as usual.
+   */
+  function doubleClick(e: MouseEvent, index: number) {
+    if ((e.target as Element).closest("button, input")) return;
+    openSlot(index);
   }
 
   /** How many tiles sit in a row of the grid now. */
@@ -546,6 +545,9 @@
   <div class="toolbar">
     {#if sel?.present}
       <span class="picked"><strong class="num">{sel.fileName.replace(".wav", "")}</strong> {sel.name}</span>
+      {#if sel.problems.length}
+        <span class="error small problems">{sel.problems.join("; ")}</span>
+      {/if}
       <div class="actions">
         <button onclick={() => onbuild(sel.index)} disabled={busy} title="Build a new reel into this slot">Replace…</button>
         {#if sel.convertible}
@@ -565,7 +567,12 @@
     {/if}
   </div>
 
-  <ol class="grid">
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <ol
+    class="grid"
+    tabindex="0"
+    aria-label="Reel slots. Arrow keys pick a slot, Enter opens it."
+  >
     {#each slots as slot (slot.index)}
       {@const spot = spots.get(slot.index)}
       <li
@@ -578,6 +585,7 @@
         class:target={dropOn === slot.index && dragFrom !== null && dragFrom !== slot.index}
         data-slot={slot.index}
         onpointerdown={(e) => startPress(e, slot)}
+        ondblclick={(e) => doubleClick(e, slot.index)}
       >
         <div class="top">
           <span class="id">
@@ -668,6 +676,15 @@
     background: var(--panel);
     border: 1px solid var(--line);
     border-radius: 8px;
+  }
+  .grid:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 4px;
+    border-radius: 8px;
+  }
+  .problems {
+    flex: 1;
+    min-width: 0;
   }
   .picked {
     min-width: 0;

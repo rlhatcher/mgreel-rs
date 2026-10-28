@@ -93,6 +93,25 @@
     }
   }
 
+  /**
+   * A mouse press on a tool tab or the Keys menu leaves the focus where it
+   * was, so the editor's shortcuts keep working after the click.
+   */
+  function keepFocus(e: PointerEvent) {
+    if (e.pointerType === "mouse") e.preventDefault();
+  }
+
+  /** Left and right move between the tool tabs, as in a tab list. */
+  function tabKeys(e: KeyboardEvent) {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    const i = TOOL_TABS.findIndex((t) => t.id === toolTab);
+    const next = TOOL_TABS[(i + (e.key === "ArrowRight" ? 1 : TOOL_TABS.length - 1)) % TOOL_TABS.length];
+    showTools(next.id);
+    const tabs = (e.currentTarget as HTMLElement).querySelectorAll<HTMLElement>('[role="tab"]');
+    tabs[TOOL_TABS.indexOf(next)]?.focus();
+  }
+
   /** Tidy: a sample below this level counts as silence. */
   let silenceDb = $state(-60);
   let shortestMs = $state(50);
@@ -915,7 +934,10 @@
 
   function onKey(e: KeyboardEvent) {
     const target = e.target as HTMLElement;
-    if (target.closest("input, textarea, select")) return;
+    // Fields take their own keys, and so do the tool tabs and the Keys menu
+    // when reached with Tab. Other buttons keep the shortcuts, so Space
+    // still plays after a click on, say, Add marker.
+    if (target.closest('input, textarea, select, [role="tab"], summary')) return;
     if (e.metaKey || e.ctrlKey) {
       const key = e.key.toLowerCase();
       if (key === "s") {
@@ -1029,7 +1051,7 @@
     </div>
     <div class="actions">
       <details class="keys">
-        <summary>Keys</summary>
+        <summary onpointerdown={keepFocus}>Keys</summary>
         <dl class="small">
           <dt>Space</dt><dd>Play or stop, from the cursor</dd>
           <dt>M, double-click</dt><dd>Add a marker</dd>
@@ -1225,9 +1247,16 @@
         </table>
       </div>
       <div class="tools">
-        <div class="tabs-inline" role="tablist" aria-label="Tools">
+        <div class="tabs-inline" role="tablist" aria-label="Tools" tabindex="-1" onkeydown={tabKeys}>
           {#each TOOL_TABS as t}
-            <button role="tab" aria-selected={toolTab === t.id} class:active={toolTab === t.id} onclick={() => showTools(t.id)}>
+            <button
+              role="tab"
+              aria-selected={toolTab === t.id}
+              tabindex={toolTab === t.id ? 0 : -1}
+              class:active={toolTab === t.id}
+              onpointerdown={keepFocus}
+              onclick={() => showTools(t.id)}
+            >
               {t.label}
             </button>
           {/each}
