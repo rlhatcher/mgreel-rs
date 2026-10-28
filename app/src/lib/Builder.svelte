@@ -138,7 +138,7 @@
       class="muted"
       title="Any sample rate, bit depth, mono or stereo. The reel is written as 48 kHz 32-bit float stereo."
     >
-      Join WAV files into a reel, one splice each, in this order.
+      Join WAV files into a reel in this order. Each starts a splice, and markers saved in a file add more.
     </p>
     <div class="actions">
       <button onclick={pick}>Add files…</button>
