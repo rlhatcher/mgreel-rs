@@ -52,7 +52,8 @@ Anyway.
 1. Set the same version in `Cargo.toml` (workspace), `app/package.json` and
    `app/src-tauri/tauri.conf.json`, commit it and push it to `main`.
 2. Tag that commit and push the tag:
-   `git tag v1.2.0 && git push origin v1.2.0`.
+   `git tag v1.2.0 && git push origin v1.2.0`. Only stable versions
+   release; the workflow refuses a tag such as `v1.2.0-rc.1`.
 3. The Release workflow builds the DMG and attaches it to a new GitHub
    release. It fails if the tag doesn't match the version in
    `tauri.conf.json`. Then it commits the new version and sha256 to
