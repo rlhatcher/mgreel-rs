@@ -133,13 +133,32 @@
 </script>
 
 <section class:dropping>
-  <header>
-    <p class="muted">
-      Add WAV files in the order you want them. Each becomes a splice, and markers saved in a file
-      split it further. Any sample rate, bit depth, mono or stereo; the reel is written as 48 kHz
-      32-bit float stereo.
+  <header class="page-header">
+    <p
+      class="muted"
+      title="Any sample rate, bit depth, mono or stereo. The reel is written as 48 kHz 32-bit float stereo."
+    >
+      Join WAV files into a reel, one splice each, in this order.
     </p>
-    <button onclick={pick}>Add files…</button>
+    <div class="actions">
+      <button onclick={pick}>Add files…</button>
+      <label class="field">
+        Write to
+        <select bind:value={target} disabled={!root}>
+          <option value={null}>A file…</option>
+          {#each slots as slot}
+            <option value={slot.index}>
+              {slot.fileName}{slot.name ? ` ${slot.name}` : ""}{slot.present
+                ? ` (replaces ${formatTime(slot.frames)})`
+                : " (empty)"}
+            </option>
+          {/each}
+        </select>
+      </label>
+      <button class="primary" onclick={build} disabled={building || usable.length === 0 || tooLong || tooMany}>
+        {building ? "Building…" : "Build reel"}
+      </button>
+    </div>
   </header>
 
   {#if rows.length === 0}
@@ -200,25 +219,9 @@
     >
       <input type="checkbox" bind:checked={keepMarkers} /> Keep the files' markers
     </label>
-    <label>
-      Fade edges <input class="num fade" type="number" min="0" max="500" bind:value={fadeMs} /> ms
+    <label class="field">
+      Fade edges <input class="num" type="number" min="0" max="500" bind:value={fadeMs} /> ms
     </label>
-    <label>
-      Write to
-      <select bind:value={target} disabled={!root}>
-        <option value={null}>A file…</option>
-        {#each slots as slot}
-          <option value={slot.index}>
-            {slot.fileName}{slot.name ? ` ${slot.name}` : ""}{slot.present
-              ? ` (replaces ${formatTime(slot.frames)})`
-              : " (empty)"}
-          </option>
-        {/each}
-      </select>
-    </label>
-    <button class="primary" onclick={build} disabled={building || usable.length === 0 || tooLong || tooMany}>
-      {building ? "Building…" : "Build reel"}
-    </button>
   </div>
 </section>
 
@@ -229,16 +232,6 @@
   section.dropping {
     outline: 2px dashed var(--accent);
     outline-offset: 6px;
-  }
-  header {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    margin-bottom: 12px;
-  }
-  header p {
-    margin: 0;
-    flex: 1;
   }
   .drop {
     border: 2px dashed var(--line);
@@ -277,9 +270,6 @@
   .row-actions button {
     padding: 1px 7px;
   }
-  .small {
-    font-size: 12px;
-  }
   .meter {
     height: 12px;
     background: var(--panel-2);
@@ -304,8 +294,5 @@
     display: flex;
     align-items: center;
     gap: 6px;
-  }
-  .fade {
-    width: 64px;
   }
 </style>
