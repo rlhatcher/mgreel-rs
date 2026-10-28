@@ -544,10 +544,13 @@
 
   <div class="toolbar">
     {#if sel?.present}
-      <span class="picked"><strong class="num">{sel.fileName.replace(".wav", "")}</strong> {sel.name}</span>
-      {#if sel.problems.length}
-        <span class="error small problems">{sel.problems.join("; ")}</span>
-      {/if}
+      <span class="picked" aria-live="polite" title={sel.problems.join("\n") || undefined}>
+        <strong class="num">{sel.fileName.replace(".wav", "")}</strong>
+        {sel.name}
+        {#if sel.problems.length}
+          <span class="error small">{sel.problems.join("; ")}</span>
+        {/if}
+      </span>
       <div class="actions">
         <button onclick={() => onbuild(sel.index)} disabled={busy} title="Build a new reel into this slot">Replace…</button>
         {#if sel.convertible}
@@ -558,7 +561,9 @@
         <button class="danger" onclick={() => clear(sel)} disabled={busy}>Remove</button>
       </div>
     {:else if sel}
-      <span class="picked"><strong class="num">{sel.fileName.replace(".wav", "")}</strong> <span class="muted">empty</span></span>
+      <span class="picked" aria-live="polite">
+        <strong class="num">{sel.fileName.replace(".wav", "")}</strong> <span class="muted">empty</span>
+      </span>
       <span class="muted small">Build a reel here with the tile's Build button.</span>
     {:else}
       <span class="muted small">
@@ -580,6 +585,7 @@
         class:empty={!slot.present}
         class:bad={slot.problems.length > 0}
         class:selected={selected === slot.index}
+        aria-current={selected === slot.index ? "true" : undefined}
         class:movable={slot.present && !busy}
         class:dragging={dragFrom === slot.index}
         class:target={dropOn === slot.index && dragFrom !== null && dragFrom !== slot.index}
@@ -682,11 +688,8 @@
     outline-offset: 4px;
     border-radius: 8px;
   }
-  .problems {
-    flex: 1;
-    min-width: 0;
-  }
   .picked {
+    flex: 1;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
