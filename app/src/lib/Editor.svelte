@@ -64,6 +64,35 @@
   /** Where the reel's audio starts on a marker file's timeline, in seconds. */
   let importOffset = $state(0);
   let importReplace = $state(false);
+  type ToolTab = "edit" | "markers" | "add" | "tidy";
+  const TOOL_TABS: { id: ToolTab; label: string }[] = [
+    { id: "edit", label: "Edit" },
+    { id: "markers", label: "Markers" },
+    { id: "add", label: "Add audio" },
+    { id: "tidy", label: "Tidy" },
+  ];
+  const TOOL_KEY = "mgreel.editorTools";
+  let toolTab = $state<ToolTab>(readToolTab());
+
+  function readToolTab(): ToolTab {
+    try {
+      const v = localStorage.getItem(TOOL_KEY);
+      if (TOOL_TABS.some((t) => t.id === v)) return v as ToolTab;
+    } catch {
+      // Storage can be off; the first tab will do.
+    }
+    return "edit";
+  }
+
+  function showTools(tab: ToolTab) {
+    toolTab = tab;
+    try {
+      localStorage.setItem(TOOL_KEY, tab);
+    } catch {
+      // Only a convenience.
+    }
+  }
+
   /** Tidy: a sample below this level counts as silence. */
   let silenceDb = $state(-60);
   let shortestMs = $state(50);
@@ -119,6 +148,11 @@
     picked && picked.last < splices.length ? picked : { first: current, last: current },
   );
   const tooMany = $derived(markers.length > MAX_MARKERS);
+  const pickedLabel = $derived(
+    selection.last > selection.first
+      ? `Splices ${selection.first + 1}–${selection.last + 1}`
+      : `Splice ${selection.first + 1}`,
+  );
   const tooLong = $derived(frames > MAX_FRAMES);
   const jumps = $derived(splices.map(loopJumps));
   const sameMarkers = (a: number[], b: number[]) => a.length === b.length && a.every((m, i) => m === b[i]);
@@ -983,15 +1017,38 @@
 
 <svelte:window onkeydown={onKey} onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={cancelDrag} />
 
-<section class:dropping>
-  <header>
-    <h2><span class="num">{slot.fileName}</span>{#if slot.name}<span class="reel-name">{slot.name}</span>{/if}</h2>
-    <span class="muted num">
-      {formatTime(frames)} · {markers.length + 1} splices
-      {#if dirty}· <strong class="unsaved">unsaved</strong>{/if}
-      {#if busy}· working…{/if}
-    </span>
+<section class="editor" class:dropping>
+  <header class="page-header">
+    <div class="title">
+      <h2><span class="num">{slot.fileName}</span>{#if slot.name}<span class="reel-name">{slot.name}</span>{/if}</h2>
+      <span class="muted num">
+        {formatTime(frames)} · {markers.length + 1} splices
+        {#if dirty}· <strong class="unsaved">unsaved</strong>{/if}
+        {#if busy}· working…{/if}
+      </span>
+    </div>
     <div class="actions">
+      <details class="keys">
+        <summary>Keys</summary>
+        <dl class="small">
+          <dt>Space</dt><dd>Play or stop, from the cursor</dd>
+          <dt>M, double-click</dt><dd>Add a marker</dd>
+          <dt>Delete</dt><dd>Delete the picked marker</dd>
+          <dt>K</dt><dd>Lock or unlock the picked marker</dd>
+          <dt>← →</dt><dd>Previous or next splice</dd>
+          <dt>S</dt><dd>Shift to the next splice</dd>
+          <dt>L</dt><dd>Loop splices or play through</dd>
+          <dt>+ − 0</dt><dd>Zoom in, out, show all</dd>
+          <dt>Shift-click</dt><dd>Pick a run of splices in the list</dd>
+          <dt>Cmd-A</dt><dd>Pick every splice</dd>
+          <dt>Escape</dt><dd>Drop the pick</dd>
+          <dt>Cmd-C X V D</dt><dd>Copy, cut, paste, duplicate splices</dd>
+          <dt>Shift-Delete</dt><dd>Delete the picked splices</dd>
+          <dt>Cmd-Z</dt><dd>Undo; with Shift, redo</dd>
+          <dt>Cmd-S</dt><dd>Save to the card</dd>
+          <dt>Drop WAV files</dt><dd>Insert them after the pick</dd>
+        </dl>
+      </details>
       <button onclick={undo} disabled={!undoStack.length || busy} title="Undo (Cmd-Z)">Undo</button>
       <button onclick={redo} disabled={!redoStack.length || busy} title="Redo (Cmd-Shift-Z)">Redo</button>
       <button onclick={revert} disabled={!dirty || saving || busy}>Revert</button>
@@ -1071,7 +1128,7 @@
           checked={reverse}
           onchange={(e) => ((reverse = e.currentTarget.checked), restart())}
         />
-        Reverse
+        Play backwards
       </label>
       <label>
         Volume
@@ -1108,6 +1165,7 @@
       {/if}
     </div>
 
+    <div class="wave">
     <Waveform
       bind:this={waveform}
       left={reel.left}
@@ -1123,14 +1181,7 @@
       ondragstart={record}
       ondragend={snapDragged}
     />
-
-    <p class="hint muted">
-      Space plays from the cursor. Double-click or press M to add a marker, drag one to move it,
-      Delete removes it, K locks it. ← → step through splices, S shifts to the next splice, L
-      switches between looping splices and playing through. In the list, click a splice to pick it,
-      Shift-click to pick a run, drag to move them. Cmd-C, Cmd-X, Cmd-V and Cmd-D copy, cut, paste
-      and duplicate splices; Shift-Delete deletes them. Cmd-Z undoes, Cmd-S saves.
-    </p>
+    </div>
 
     <div class="lower">
       <div class="list" bind:this={list}>
@@ -1174,203 +1225,209 @@
         </table>
       </div>
       <div class="tools">
-        <h3>
-          Splice{selection.last > selection.first ? "s" : ""}
-          {selection.first + 1}{selection.last > selection.first ? `–${selection.last + 1}` : ""}
-        </h3>
-        <div class="row">
-          <button onclick={cut} disabled={busy}>Cut</button>
-          <button onclick={copy} disabled={busy}>Copy</button>
-          <button onclick={paste} disabled={busy} title="After the picked splices">Paste</button>
-          <button onclick={() => runEdit({ kind: "duplicate" })} disabled={busy}>Duplicate</button>
-          <button
-            class="danger"
-            onclick={() => runEdit({ kind: "delete" })}
-            disabled={busy || splices.length < 2}
-          >
-            Delete
-          </button>
+        <div class="tabs-inline" role="tablist" aria-label="Tools">
+          {#each TOOL_TABS as t}
+            <button role="tab" aria-selected={toolTab === t.id} class:active={toolTab === t.id} onclick={() => showTools(t.id)}>
+              {t.label}
+            </button>
+          {/each}
         </div>
-        <div class="row">
-          <button onclick={() => runEdit({ kind: "reverse" })} disabled={busy}>Reverse</button>
-          <button
-            onclick={() => runEdit({ kind: "shuffle", seed: Math.floor(Math.random() * 2 ** 32) })}
-            disabled={busy || selection.first === selection.last}
-            title="Put the picked splices in a random order"
-          >
-            Shuffle
-          </button>
-        </div>
-        <div class="row">
-          <input type="number" step="0.5" bind:value={gainDb} /> dB
-          <button onclick={() => runEdit({ kind: "gain", db: gainDb })} disabled={busy}>Gain</button>
-        </div>
-        <div class="row">
-          <input type="number" step="0.5" max="0" bind:value={normalizeDb} /> dBFS
-          <button onclick={() => runEdit({ kind: "normalize", db: normalizeDb })} disabled={busy}>
-            Normalize
-          </button>
-        </div>
-        <div class="row">
-          <button
-            onclick={() => runEdit({ kind: "matchLevels" })}
-            disabled={busy || selection.first === selection.last}
-            title="Bring each picked splice to their average loudness, so Organize doesn't jump in level"
-          >
-            Match levels
-          </button>
-        </div>
-        <div class="row">
-          <input type="number" min="1" step="1" bind:value={fadeMs} /> ms
-          <button onclick={() => runEdit({ kind: "fadeIn", ms: fadeMs })} disabled={busy}>Fade in</button>
-          <button onclick={() => runEdit({ kind: "fadeOut", ms: fadeMs })} disabled={busy}>Fade out</button>
-        </div>
-        <div class="row">
-          <input type="number" min="2" step="5" bind:value={loopMs} /> ms
-          <button
-            onclick={() => runEdit({ kind: "smoothLoop", ms: loopMs })}
-            disabled={busy}
-            title="Crossfade each splice's end into its start so it loops without a jump. Shortens it by this much."
-          >
-            Smooth loop
-          </button>
-        </div>
-        <div class="row">
-          <button onclick={() => runEdit({ kind: "removeDc" })} disabled={busy}>Remove DC</button>
-          <input type="number" min="5" max="2000" step="5" bind:value={highPassHz} /> Hz
-          <button onclick={() => runEdit({ kind: "highPass", hz: highPassHz })} disabled={busy}>
-            High-pass
-          </button>
-        </div>
+        <div class="tool-body" role="tabpanel">
+          {#if toolTab === "edit"}
+            <p class="scope">{pickedLabel}. These change their audio.</p>
+            <div class="row">
+              <button onclick={cut} disabled={busy}>Cut</button>
+              <button onclick={copy} disabled={busy}>Copy</button>
+              <button onclick={paste} disabled={busy} title="After the picked splices">Paste</button>
+              <button onclick={() => runEdit({ kind: "duplicate" })} disabled={busy}>Duplicate</button>
+              <button
+                class="danger"
+                onclick={() => runEdit({ kind: "delete" })}
+                disabled={busy || splices.length < 2}
+              >
+                Delete
+              </button>
+            </div>
+            <div class="row">
+              <button onclick={() => runEdit({ kind: "reverse" })} disabled={busy}>Reverse</button>
+              <button
+                onclick={() => runEdit({ kind: "shuffle", seed: Math.floor(Math.random() * 2 ** 32) })}
+                disabled={busy || selection.first === selection.last}
+                title="Put the picked splices in a random order"
+              >
+                Shuffle
+              </button>
+              <button
+                onclick={() => runEdit({ kind: "matchLevels" })}
+                disabled={busy || selection.first === selection.last}
+                title="Bring each picked splice to their average loudness, so Organize doesn't jump in level"
+              >
+                Match levels
+              </button>
+              <button onclick={() => runEdit({ kind: "removeDc" })} disabled={busy}>Remove DC</button>
+            </div>
+            <div class="row">
+              <label class="field">Gain <input type="number" step="0.5" bind:value={gainDb} /> dB</label>
+              <button onclick={() => runEdit({ kind: "gain", db: gainDb })} disabled={busy}>Apply</button>
+            </div>
+            <div class="row">
+              <label class="field">Peak <input type="number" step="0.5" max="0" bind:value={normalizeDb} /> dBFS</label>
+              <button onclick={() => runEdit({ kind: "normalize", db: normalizeDb })} disabled={busy}>Normalize</button>
+            </div>
+            <div class="row">
+              <label class="field">Fade <input type="number" min="1" step="1" bind:value={fadeMs} /> ms</label>
+              <button onclick={() => runEdit({ kind: "fadeIn", ms: fadeMs })} disabled={busy}>Fade in</button>
+              <button onclick={() => runEdit({ kind: "fadeOut", ms: fadeMs })} disabled={busy}>Fade out</button>
+            </div>
+            <div class="row">
+              <label class="field">Crossfade <input type="number" min="2" step="5" bind:value={loopMs} /> ms</label>
+              <button
+                onclick={() => runEdit({ kind: "smoothLoop", ms: loopMs })}
+                disabled={busy}
+                title="Crossfade each splice's end into its start so it loops without a jump. Shortens it by this much."
+              >
+                Smooth loop
+              </button>
+            </div>
+            <div class="row">
+              <label class="field">Cutoff <input type="number" min="5" max="2000" step="5" bind:value={highPassHz} /> Hz</label>
+              <button onclick={() => runEdit({ kind: "highPass", hz: highPassHz })} disabled={busy}>High-pass</button>
+            </div>
+            <div class="row">
+              <label class="field">Speed <input type="number" min="-36" max="36" step="1" bind:value={speedSt} /> st</label>
+              <button
+                onclick={() => runEdit({ kind: "speed", semitones: speedSt })}
+                disabled={busy || speedSt === 0}
+                title="Like tape: pitch and length change together. +12 is an octave up and half as long."
+              >
+                Change speed
+              </button>
+            </div>
+          {:else if toolTab === "markers"}
+            <p class="scope">The whole reel. These change markers only, not the audio.</p>
+            <label><input type="checkbox" bind:checked={snap} /> Snap new markers to zero crossings</label>
 
-        <div class="row">
-          <input type="number" min="-36" max="36" step="1" bind:value={speedSt} /> st
-          <button
-            onclick={() => runEdit({ kind: "speed", semitones: speedSt })}
-            disabled={busy || speedSt === 0}
-            title="Like tape: pitch and length change together. +12 is an octave up and half as long."
-          >
-            Change speed
-          </button>
-        </div>
+            <h4>Auto-slice</h4>
+            <select value={sliceMode} onchange={(e) => setSliceMode(e.currentTarget.value as SliceMode)}>
+              <option value="phrases">Phrases: where the sound changes character</option>
+              <option value="gestures">Gestures: each distinct sound event</option>
+            </select>
+            <div class="row">
+              <label class="field">Shortest <input type="number" min="0.05" step="0.1" bind:value={sliceMin} /> s</label>
+              <label class="field" title="Longer splices get cut at their quietest point. Leave empty for no limit.">
+                Longest <input type="number" min="0.1" step="0.5" placeholder="none" bind:value={sliceLongest} /> s
+              </label>
+            </div>
+            {#if sliceLongest && sliceLongest < 2 * sliceMin}
+              <p class="muted small">Raised to {2 * sliceMin} s: a splice can't be cut into two pieces shorter than the shortest.</p>
+            {/if}
+            <div class="row">
+              <label class="field">At most <input type="number" min="1" max={MAX_MARKERS + 1} bind:value={sliceMax} /> splices</label>
+              <button
+                onclick={runAutoSlice}
+                disabled={slicing}
+                title="Listens for changes in level and spectrum, not pitch or beat, and cuts in the quiet between sounds. Replaces the unlocked markers."
+              >
+                {slicing ? "Listening…" : "Find splices"}
+              </button>
+            </div>
 
-        <h3>Add audio</h3>
-        <div class="row">
-          <button onclick={() => addFiles()} disabled={busy} title="Each file becomes a splice after the picked ones. You can also drop WAV files here.">
-            Insert files…
-          </button>
-          <button onclick={() => fileIntoSplice(false)} disabled={busy || selection.first !== selection.last}>
-            Replace with file…
-          </button>
-        </div>
-        <div class="row">
-          <label title="Like the module's S.O.S. control: 0% keeps only the file, 100% only what was there">
-            S.O.S.
-            <input type="number" min="0" max="100" step="5" bind:value={sos} /> %
-          </label>
-          <button onclick={() => fileIntoSplice(true)} disabled={busy || selection.first !== selection.last}>
-            Mix in file…
-          </button>
-        </div>
-        <div class="row">
-          <button onclick={exportPicked} disabled={busy}>Export as WAV files…</button>
-        </div>
+            <h4>Split evenly</h4>
+            <div class="row">
+              <label class="field">Into <input type="number" min="1" max={MAX_MARKERS + 1} bind:value={splitCount} /> splices</label>
+              <button onclick={splitEvenly} title="Replaces the unlocked markers">Split evenly</button>
+            </div>
 
-        <h3>Auto-slice</h3>
-        <select value={sliceMode} onchange={(e) => setSliceMode(e.currentTarget.value as SliceMode)}>
-          <option value="phrases">Phrases: where the sound changes character</option>
-          <option value="gestures">Gestures: each distinct sound event</option>
-        </select>
-        <label>
-          Shortest splice
-          <input type="number" min="0.05" step="0.1" bind:value={sliceMin} /> s
-        </label>
-        <label title="Longer splices get cut at their quietest point. Leave empty for no limit.">
-          Longest splice
-          <input type="number" min="0.1" step="0.5" placeholder="none" bind:value={sliceLongest} /> s
-        </label>
-        {#if sliceLongest && sliceLongest < 2 * sliceMin}
-          <p class="muted small">Raised to {2 * sliceMin} s: a splice can't be cut into two pieces shorter than the shortest.</p>
-        {/if}
-        <label>
-          At most
-          <input type="number" min="1" max={MAX_MARKERS + 1} bind:value={sliceMax} /> splices
-        </label>
-        <button onclick={runAutoSlice} disabled={slicing}>
-          {slicing ? "Listening…" : "Find splices"}
-        </button>
-        <p class="muted small">
-          Works on any source; it listens for changes in level and spectrum, not pitch or beat.
-          Cuts go in the quiet moments between sounds. Replaces the markers that aren't locked.
-        </p>
+            <h4>Import</h4>
+            <label class="field" title="If the audio was exported from later than the start of the file's timeline, how much later">
+              Audio starts at <input type="number" step="0.1" bind:value={importOffset} /> s
+            </label>
+            <label><input type="checkbox" bind:checked={importReplace} /> Replace the unlocked markers</label>
+            <div class="row">
+              <button
+                onclick={importMarkers}
+                title="From an Audacity label file, a REAPER marker export (.csv), an Ableton Live set's locators, or a WAV file's cue points and region ends"
+              >
+                Import markers…
+              </button>
+            </div>
 
-        <h3>Markers</h3>
-        <label><input type="checkbox" bind:checked={snap} /> Snap to zero crossings</label>
-        <label>
-          Split into
-          <input type="number" min="1" max={MAX_MARKERS + 1} bind:value={splitCount} />
-          equal splices
-        </label>
-        <button onclick={splitEvenly}>Replace markers</button>
-        <button
-          onclick={importMarkers}
-          title="From an Audacity label file, a REAPER marker export (.csv), an Ableton Live set's locators, or a WAV file's cue points and region ends"
-        >
-          Import markers…
-        </button>
-        <label title="If the audio was exported from later than the start of the file's timeline, how much later">
-          Audio starts at
-          <input type="number" step="0.1" bind:value={importOffset} /> s
-        </label>
-        <label><input type="checkbox" bind:checked={importReplace} /> Replace the unlocked markers</label>
-
-        <h3>Tidy</h3>
-        <p class="muted small">
-          For reels recorded or spliced on the module. Each works on the whole reel and undoes on its own.
-        </p>
-        <label>
-          Silence is below
-          <input type="number" max="0" step="6" bind:value={silenceDb} /> dBFS
-        </label>
-        <div class="row">
-          <button onclick={dropSilent} disabled={busy || splices.length < 2}>Delete silent splices</button>
-          <button
-            onclick={trimStarts}
-            disabled={busy}
-            title="Cut each splice's silent start, leaving 5 ms before the sound so the attack stays"
-          >
-            Trim silent starts
-          </button>
+            <h4>Clear</h4>
+            <div class="row">
+              <button class="danger" onclick={removeUnlocked} disabled={markers.every((m) => locked.has(m))}>
+                {locked.size ? "Remove unlocked markers" : "Remove all markers"}
+              </button>
+            </div>
+          {:else if toolTab === "add"}
+            <p class="scope">{pickedLabel}. New audio goes after it; replace and mix need one splice.</p>
+            <div class="row">
+              <button onclick={() => addFiles()} disabled={busy} title="Each file becomes a splice after the picked ones. You can also drop WAV files here.">
+                Insert files…
+              </button>
+              <button onclick={() => fileIntoSplice(false)} disabled={busy || selection.first !== selection.last}>
+                Replace with file…
+              </button>
+            </div>
+            <div class="row">
+              <label class="field" title="Like the module's S.O.S. control: 0% keeps only the file, 100% only what was there">
+                S.O.S. <input type="number" min="0" max="100" step="5" bind:value={sos} /> %
+              </label>
+              <button onclick={() => fileIntoSplice(true)} disabled={busy || selection.first !== selection.last}>
+                Mix in file…
+              </button>
+            </div>
+            <div class="row">
+              <button onclick={exportPicked} disabled={busy}>Export as WAV files…</button>
+            </div>
+          {:else}
+            <p class="scope">The whole reel, for reels recorded or spliced on the module. Each step undoes on its own.</p>
+            <label class="field">Silence below <input type="number" max="0" step="6" bind:value={silenceDb} /> dBFS</label>
+            <div class="row">
+              <button onclick={dropSilent} disabled={busy || splices.length < 2}>Delete silent splices</button>
+              <button
+                onclick={trimStarts}
+                disabled={busy}
+                title="Cut each splice's silent start, leaving 5 ms before the sound so the attack stays"
+              >
+                Trim silent starts
+              </button>
+            </div>
+            <div class="row">
+              <label class="field">Merge splices shorter than <input type="number" min="1" step="10" bind:value={shortestMs} /> ms</label>
+              <button
+                onclick={mergeShort}
+                disabled={splices.length < 2}
+                title="Join each shorter splice to its shorter neighbour. Locked markers stay."
+              >
+                Merge
+              </button>
+            </div>
+          {/if}
         </div>
-        <label>
-          Shortest splice
-          <input type="number" min="1" step="10" bind:value={shortestMs} /> ms
-        </label>
-        <button
-          onclick={mergeShort}
-          disabled={splices.length < 2}
-          title="Join each shorter splice to its shorter neighbour. Locked markers stay."
-        >
-          Merge shorter splices
-        </button>
-        <button class="danger" onclick={removeUnlocked} disabled={markers.every((m) => locked.has(m))}>
-          {locked.size ? "Remove unlocked markers" : "Remove all markers"}
-        </button>
       </div>
     </div>
   {/if}
 </section>
 
 <style>
-  header {
+  /* The editor fills the window: the waveform and the lower split share the
+     height, and the splice list and the tools scroll on their own. */
+  .editor {
+    flex: 1;
+    min-height: 560px;
+    display: flex;
+    flex-direction: column;
+  }
+  .title {
     display: flex;
     align-items: baseline;
-    gap: 12px;
-    margin-bottom: 12px;
+    gap: var(--s3);
+    min-width: 0;
   }
   h2 {
     margin: 0;
-    font-size: 18px;
+    font-size: var(--t-title);
+    white-space: nowrap;
   }
   .reel-name {
     margin-left: 10px;
@@ -1379,36 +1436,74 @@
   .unsaved {
     color: var(--accent);
   }
-  .actions {
-    margin-left: auto;
-    display: flex;
-    gap: 8px;
+  .keys {
+    position: relative;
+  }
+  .keys summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 5px 12px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel-2);
+  }
+  .keys summary::-webkit-details-marker {
+    display: none;
+  }
+  .keys dl {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 10;
+    width: 340px;
+    margin: 0;
+    padding: var(--s2) var(--s3);
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 2px var(--s3);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+  }
+  .keys dt {
+    font-family: var(--mono);
+    white-space: nowrap;
+  }
+  .keys dd {
+    margin: 0;
   }
   .transport {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-bottom: 10px;
+    flex-wrap: wrap;
+    gap: var(--s2);
+    margin-bottom: var(--s2);
   }
   .transport label {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--s1);
   }
   .spacer {
     flex: 1;
   }
-  .hint {
-    font-size: 12px;
-    margin: 8px 0 14px;
+  .wave {
+    flex: 3 1 0;
+    min-height: 160px;
+    display: flex;
+    flex-direction: column;
+    margin-bottom: var(--s3);
   }
   .lower {
+    flex: 2 1 0;
+    min-height: 200px;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 260px;
-    gap: 16px;
+    grid-template-columns: minmax(0, 1fr) clamp(260px, 30%, 320px);
+    gap: var(--s3);
   }
   .list {
-    max-height: 260px;
+    min-height: 0;
     overflow: auto;
     border: 1px solid var(--line);
     border-radius: 8px;
@@ -1424,11 +1519,12 @@
     background: var(--panel-2);
     text-align: left;
     font-weight: 600;
-    font-size: 12px;
+    font-size: var(--t-small);
   }
   th,
   td {
     padding: 4px 10px;
+    white-space: nowrap;
   }
   tbody tr {
     cursor: pointer;
@@ -1445,34 +1541,51 @@
     box-shadow: inset 0 -2px 0 var(--accent);
   }
   .tools {
+    min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--s2);
+    padding: var(--s2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+  }
+  .tool-body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
     align-items: flex-start;
+    gap: var(--s2);
+    padding: 0 var(--s1) var(--s1);
   }
-  .tools h3 {
-    margin: 0;
-    font-size: 13px;
+  .tool-body h4 {
+    margin: var(--s2) 0 0;
+    font-size: var(--t-label);
   }
-  .tools h3:not(:first-child) {
-    margin-top: 10px;
-  }
-  .tools select {
+  .tool-body select {
     width: 100%;
   }
+  .scope {
+    margin: 0;
+    font-size: var(--t-small);
+    color: var(--muted);
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    flex-wrap: wrap;
+  }
   .small {
-    font-size: 12px;
     margin: 0;
   }
-  .tools input {
-    width: 64px;
-  }
   .error {
-    margin: 0 0 10px;
+    margin: 0 0 var(--s2);
   }
   .module {
-    flex-wrap: wrap;
-    font-size: 13px;
+    font-size: var(--t-label);
   }
   .module input[type="range"] {
     width: 110px;
@@ -1489,12 +1602,6 @@
   }
   tr.current td:first-child {
     font-weight: 700;
-  }
-  .row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
   }
   .jump {
     font-size: 11px;
