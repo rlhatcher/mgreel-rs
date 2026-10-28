@@ -41,7 +41,8 @@
 
   const BLOCK = 256;
   const HANDLE_PX = 6;
-  const HEIGHT = 240;
+  /** Set from the space the waveform is given. */
+  let height = $state(240);
 
   let canvas: HTMLCanvasElement;
   let width = $state(800);
@@ -175,17 +176,17 @@
     if (!canvas) return;
     const dpr = window.devicePixelRatio || 1;
     canvas.width = width * dpr;
-    canvas.height = HEIGHT * dpr;
+    canvas.height = height * dpr;
     const ctx = canvas.getContext("2d")!;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const css = getComputedStyle(canvas);
     const color = (name: string) => css.getPropertyValue(name).trim();
-    const mid = HEIGHT / 2;
+    const mid = height / 2;
 
     ctx.fillStyle = color("--panel");
-    ctx.fillRect(0, 0, width, HEIGHT);
+    ctx.fillRect(0, 0, width, height);
 
-    if (spectrum) ctx.drawImage(spectrumImage(color), 0, 0, width, HEIGHT);
+    if (spectrum) ctx.drawImage(spectrumImage(color), 0, 0, width, height);
 
     // Shade alternate splices and highlight the one under the cursor. Over
     // a spectrogram only the highlight shows, as a tint.
@@ -197,10 +198,10 @@
       if (x1 <= 0 || x0 >= width) return;
       if (cursor >= s && cursor < e) {
         ctx.fillStyle = color("--select");
-        ctx.fillRect(x0, 0, x1 - x0, HEIGHT);
+        ctx.fillRect(x0, 0, x1 - x0, height);
       } else if (i % 2 === 1 && !spectrum) {
         ctx.fillStyle = color("--panel-2");
-        ctx.fillRect(x0, 0, x1 - x0, HEIGHT);
+        ctx.fillRect(x0, 0, x1 - x0, height);
       }
     });
 
@@ -227,7 +228,7 @@
       ctx.lineWidth = i === selectedMarker ? 2 : 1;
       ctx.beginPath();
       ctx.moveTo(x, 0);
-      ctx.lineTo(x, HEIGHT);
+      ctx.lineTo(x, height);
       ctx.stroke();
       if (isLocked) {
         // A square handle for a locked marker, a triangle otherwise.
@@ -242,23 +243,23 @@
     });
 
     ctx.fillStyle = color("--muted");
-    ctx.fillRect(Math.round(toX(cursor)), 0, 1, HEIGHT);
+    ctx.fillRect(Math.round(toX(cursor)), 0, 1, height);
     if (playhead !== null) {
       // A 2 px line on a background-coloured band, so it shows over the
       // waveform and the spectrogram, with a handle at each edge.
       const x = Math.round(toX(playhead));
       ctx.fillStyle = color("--panel");
-      ctx.fillRect(x - 2, 0, 6, HEIGHT);
+      ctx.fillRect(x - 2, 0, 6, height);
       ctx.fillStyle = color("--playhead");
-      ctx.fillRect(x, 0, 2, HEIGHT);
+      ctx.fillRect(x, 0, 2, height);
       const h = HANDLE_PX + 1;
       ctx.beginPath();
       ctx.moveTo(x + 1 - h, 0);
       ctx.lineTo(x + 1 + h, 0);
       ctx.lineTo(x + 1, h + 2);
-      ctx.moveTo(x + 1 - h, HEIGHT);
-      ctx.lineTo(x + 1 + h, HEIGHT);
-      ctx.lineTo(x + 1, HEIGHT - h - 2);
+      ctx.moveTo(x + 1 - h, height);
+      ctx.lineTo(x + 1 + h, height);
+      ctx.lineTo(x + 1, height - h - 2);
       ctx.fill();
     }
   }
@@ -278,12 +279,15 @@
 
   $effect(() => {
     // Track everything draw() reads.
-    void [width, viewStart, viewEnd, markers.length, ...markers, cursor, playhead, selectedMarker, blocks, locked, spectrum];
+    void [width, height, viewStart, viewEnd, markers.length, ...markers, cursor, playhead, selectedMarker, blocks, locked, spectrum];
     scheduleDraw();
   });
 
   onMount(() => {
-    const resize = new ResizeObserver(([entry]) => (width = Math.max(100, Math.floor(entry.contentRect.width))));
+    const resize = new ResizeObserver(([entry]) => {
+      width = Math.max(100, Math.floor(entry.contentRect.width));
+      height = Math.max(80, Math.floor(entry.contentRect.height));
+    });
     resize.observe(canvas.parentElement!);
     const scheme = matchMedia("(prefers-color-scheme: dark)");
     const redraw = () => scheduleDraw();
@@ -395,11 +399,11 @@
   }
 </script>
 
-<div class="wrap" style:height="{HEIGHT}px">
+<div class="wrap">
   <canvas
     bind:this={canvas}
     style:width="{width}px"
-    style:height="{HEIGHT}px"
+    style:height="{height}px"
     style:cursor={hoverMarker ? "ew-resize" : "text"}
     onpointerdown={onPointerDown}
     onpointermove={onPointerMove}
@@ -410,7 +414,10 @@
 </div>
 
 <style>
+  /* It fills the box its parent gives it; the canvas follows that size. */
   .wrap {
+    flex: 1;
+    min-height: 0;
     border: 1px solid var(--line);
     border-radius: 8px;
     overflow: hidden;
