@@ -1,39 +1,77 @@
-# mgreel (Rust version)
+# Morphagene Reels
 
-A Rust implementation of [mgreel](https://github.com/olt/mgreel) - a command-line tool to convert Wave audio files into a format compatible with the Make Noise Morphagene eurorack module.
+A Mac app for the Make Noise Morphagene's microSD card: the reels on it, the
+splices in them, and the cards you keep for later.
 
-> **Note**: This is a Rust port of the original JavaScript implementation by Oliver Tonnhofer. The original project can be found at https://github.com/olt/mgreel
+[Install](#install) · [Guide](docs/) · [Command line](docs/command-line.md) ·
+[Report a problem](https://github.com/rlhatcher/mgreel-rs/issues)
+
+![The Library: a card's 32 reel slots as tiles](docs/images/library.png)
+
+## About
+
+The Morphagene keeps its reels on a microSD card as WAV files named `mg1.wav`
+to `mgw.wav`, with each splice marked by a cue point. Morphagene Reels opens
+that card and shows it the way the module sees it: 32 slots, the colour each
+reel takes in Reel mode, and about where Organize selects it. From there you
+edit splices, build new reels, and keep whole cards as sets.
+
+Everything works on files on your Mac. Before the app changes a file on the
+card it copies the old one to a backups folder, and when a card mounts it
+copies any reel recorded on the module that it hasn't seen yet.
+
+The repo also builds `mgreel`, a command-line tool that joins WAV files into a
+reel. It started as a Rust port of [Oliver Tonnhofer's
+mgreel](https://github.com/olt/mgreel).
 
 ## Features
 
-- Concatenates multiple Wave files into a single output file
-- Converts all audio to Morphagene's required format: 32-bit float, 48kHz, stereo
-- Automatically sets splice markers (cue points) at the end of each input file
-- Converts mono files to stereo
-- High-quality resampling using sinc interpolation
-- Fast and memory-efficient
+**The card**
 
-## Installation
+- The 32 slots as tiles, with each reel's name, note, length against the 2.9
+  minute limit, and splice markers.
+- Drag a reel to move it, Option-drag to swap two. Names move with their
+  reels.
+- A card check: reels the module can't play, WAV files it won't load because
+  of their name or folder, macOS `._` files, and a card that isn't FAT32. Each
+  has a fix.
+- Back up, restore and eject the card, and put back any single file from its
+  history.
 
-### From source
+**Splices**
 
-```bash
-cargo build --release
-```
+- Playback that behaves like the module: a splice loops until Organize or
+  Shift picks the next, with Vari-Speed from 12 semitones up to 26 down.
+- Add, drag, lock and delete markers, snap them to zero crossings, split
+  evenly, or let auto-slice find splices in any sound by level and spectrum.
+- Cut, copy, paste, duplicate, reorder, reverse, shuffle, fade, normalize,
+  match levels, smooth loops, high-pass and change speed, all with undo.
+- Each splice's Organize voltage range, and a flag on splices that jump from
+  end to start.
 
-The binary will be available at `target/release/mgreel`
+**Getting audio in**
 
-### Install globally
+- Build a reel from WAV files of any rate, depth or channel count, with trims,
+  normalize and fades. Cue points and region ends saved in the files become
+  splices.
+- Import markers from Audacity labels, a REAPER marker export, an Ableton Live
+  set's locators, or another WAV file.
+- Tidy a reel recorded on the module: delete silent splices, trim silent
+  starts, merge splices that are too short.
 
-```bash
-cargo install --locked --git https://github.com/rlhatcher/mgreel-rs.git mgreel-rs
-```
+**Sets and options**
 
-Or `cargo install --locked --path crates/mgreel-cli` from a checkout.
+- Keep whole cards in `~/Music/Morphagene Sets` and load one back onto any
+  card. Import a downloaded reel pack as a set.
+- Edit `options.txt` as a form; only the values change.
 
-### The app
+![The splice editor](docs/images/splices.png)
 
-With Homebrew, on an Apple Silicon Mac:
+## Install
+
+The app needs a Mac with Apple Silicon.
+
+### With Homebrew
 
 ```bash
 brew tap rlhatcher/mgreel https://github.com/rlhatcher/mgreel-rs
@@ -41,105 +79,57 @@ brew trust --cask rlhatcher/mgreel/morphagene-reels
 brew install --cask rlhatcher/mgreel/morphagene-reels
 ```
 
-The app is ad-hoc signed, not notarized. The cask clears the quarantine flag
-Homebrew sets, so it opens without a warning. Each release on GitHub also has
-`Morphagene-Reels-<version>-arm64.dmg`; installed from that, macOS blocks the
-first launch until you allow it in System Settings, Privacy & Security, Open
-Anyway.
+`brew upgrade` keeps it current. The app is ad-hoc signed, not notarized by
+Apple, so the cask clears the quarantine flag Homebrew sets and it opens
+without a warning.
 
-### Releasing
+### From a release
 
-1. Set the same version in `Cargo.toml` (workspace), `app/package.json` and
-   `app/src-tauri/tauri.conf.json`, commit it and push it to `main`.
-2. Tag that commit and push the tag:
-   `git tag v1.2.0 && git push origin v1.2.0`. Only stable versions
-   release; the workflow refuses a tag such as `v1.2.0-rc.1`.
-3. The Release workflow builds the DMG and attaches it to a new GitHub
-   release. It fails if the tag doesn't match the version in
-   `tauri.conf.json`. Then it commits the new version and sha256 to
-   `Casks/morphagene-reels.rb` on `main`, so `brew upgrade` picks it up. A
-   failed run can be rerun; an older release never replaces a newer one in
-   the cask.
+Download `Morphagene-Reels-<version>-arm64.dmg` from
+[Releases](https://github.com/rlhatcher/mgreel-rs/releases) and drag the app to
+Applications. macOS blocks the first launch, because Apple hasn't notarized
+it: allow it in System Settings, Privacy & Security, Open Anyway.
 
-## Layout
-
-The repo is a Cargo workspace:
-
-- `crates/mgreel-core`: library for reels (WAV and `cue ` chunk I/O,
-  resampling, splice markers, limit checks, auto-slicing at phrase or
-  gesture level from level and spectrum alone, so it suits found sound and
-  field recordings as well as music), the SD card (32 slots, swap,
-  reorder, backup, restore) and `options.txt` (edits change only the value,
-  as the manual asks).
-- `crates/mgreel-cli`: the `mgreel` binary, package name `mgreel-rs`.
-
-## Usage
+### The command-line tool
 
 ```bash
-mgreel --out output.wav input1.wav input2.wav input3.wav
+cargo install --locked --git https://github.com/rlhatcher/mgreel-rs.git mgreel-rs
 ```
 
-Or pipe to stdout:
+This installs `mgreel`. See [the command line](docs/command-line.md).
 
-```bash
-mgreel input1.wav input2.wav > output.wav
-```
+### From source
 
-### Examples
+See [development](docs/development.md).
 
-Convert all WAV files in a directory:
+## Guide
 
-```bash
-mgreel --out morphagene-reel.wav samples/*.wav
-```
+- [The Library](docs/library.md): the card, its slots, names, the card
+  check, backups and history.
+- [Splices](docs/splices.md): the editor, playback, markers and every tool.
+- [Build](docs/build.md): a new reel from WAV files.
+- [Sets](docs/sets.md): whole cards kept on your Mac, and reel packs.
+- [options.txt](docs/options.md): the module's firmware options.
+- [The command line](docs/command-line.md): `mgreel`.
+- [Development](docs/development.md): building, testing and releasing.
 
-Keep the markers saved in the files, such as cue points from a DAW or the
-region ends RX and Pro Tools write, as splices too:
+## Not yet checked on a module
 
-```bash
-mgreel --keep-markers --out morphagene-reel.wav take1.wav take2.wav
-```
+The app follows the Morphagene manual, but some of it hasn't been tried on
+hardware yet:
 
-## How it works
-
-1. Reads each input WAV file (8, 16, 24 or 32-bit PCM, or 32/64-bit float)
-2. Converts to 32-bit float samples, scaled by the source's bit depth
-3. Resamples to 48kHz if necessary
-4. Converts mono to stereo (duplicates channel)
-5. Concatenates all samples
-6. Adds cue points at splice boundaries
-7. Writes final WAV file with proper Morphagene format
-8. Warns if the reel is over 2.9 minutes or has more than 299 markers, the
-   Morphagene's limits
-
-## Dependencies
-
-- `clap` - Command-line argument parsing
-- `hound` - WAV file reading and writing
-- `rubato` - High-quality audio resampling
-- `anyhow` - Error handling
-
-## Differences from JavaScript version
-
-- Written in Rust for better performance and memory safety
-- Uses high-quality sinc interpolation for resampling
-- Statically typed with compile-time guarantees
-- Single binary with no runtime dependencies
+- that the module ignores `mgreel.json`, the file where the app keeps reel
+  names;
+- how the module counts reels when there are empty slots between them;
+- where the Organize zones fall in Reel mode, which the app spreads evenly.
 
 ## Acknowledgments
 
-This is a Rust port of the original [mgreel](https://github.com/olt/mgreel) JavaScript implementation by Oliver Tonnhofer. The original project provided the foundation and specification for this implementation.
+- [mgreel](https://github.com/olt/mgreel) by Oliver Tonnhofer, the original
+  JavaScript tool this repo started from.
+- [Make Noise](https://www.makenoisemusic.com/) for the Morphagene and its
+  manual, which gives the reel format, limits and Reel mode.
 
 ## License
 
-ISC License
-
-Copyright (c) 2020, Oliver Tonnhofer (original JavaScript implementation)
-Copyright (c) 2026, [Your Name] (Rust port)
-
-See LICENSE file for full text.
-
-## Authors
-
-- **Original JavaScript version**: Oliver Tonnhofer (2020) - https://github.com/olt/mgreel
-- **Rust port**: [Your Name] (2026)
+ISC. See [LICENSE](LICENSE).
