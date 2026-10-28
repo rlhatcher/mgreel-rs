@@ -159,7 +159,7 @@
     <div class="tabs">
       <button class:active={tab === "library"} onclick={() => go("library")} disabled={!root}>Library</button>
       <button class:active={tab === "editor"} onclick={() => go("editor")} disabled={!root || editing === null}>
-        Splices{editing !== null && slots[editing] ? `: ${slots[editing].fileName}` : ""}
+        Splices{editing !== null && slots[editing] ? ` · ${slots[editing].fileName.replace(".wav", "")}` : ""}
       </button>
       <button class:active={tab === "builder"} onclick={() => go("builder")}>Build</button>
       <button class:active={tab === "options"} onclick={() => go("options")} disabled={!root}>options.txt</button>
@@ -185,7 +185,7 @@
     </div>
   </nav>
 
-  <main>
+  <main class:fill={tab === "editor" && !!root && editing !== null && !!slots[editing]}>
     {#if !root && tab !== "builder" && tab !== "sets"}
       <div class="empty">
         <h1>Insert the Morphagene's microSD card</h1>
@@ -257,6 +257,16 @@
   .brand {
     font-weight: 700;
     letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+  /* Narrow windows need the room for the tabs and the card picker. */
+  @media (max-width: 900px) {
+    .brand {
+      display: none;
+    }
+  }
+  nav button {
+    white-space: nowrap;
   }
   .tabs {
     display: flex;
@@ -278,8 +288,15 @@
   }
   main {
     flex: 1;
+    min-height: 0;
     overflow: auto;
-    padding: 16px;
+    padding: var(--s4);
+  }
+  /* The editor sizes its own scrolling parts to the window. Below the
+     editor's least height, the page scrolls instead of cutting it off. */
+  main.fill {
+    display: flex;
+    flex-direction: column;
   }
   .empty {
     max-width: 520px;
