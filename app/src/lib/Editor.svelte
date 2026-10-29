@@ -1063,7 +1063,7 @@
           <dt>+ − 0</dt><dd>Zoom in, out, show all</dd>
           <dt>Shift-click</dt><dd>Pick a run of splices in the list</dd>
           <dt>Cmd-A</dt><dd>Pick every splice</dd>
-          <dt>Escape</dt><dd>Drop the pick</dd>
+          <dt>Escape</dt><dd>Stop playback and any drag</dd>
           <dt>Cmd-C X V D</dt><dd>Copy, cut, paste, duplicate splices</dd>
           <dt>Shift-Delete</dt><dd>Delete the picked splices</dd>
           <dt>Cmd-Z</dt><dd>Undo; with Shift, redo</dd>

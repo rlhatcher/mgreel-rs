@@ -17,8 +17,9 @@ nothing behind. A name already in use is refused.
 
 ## Loading a set
 
-**Load onto card** replaces every reel, `options.txt` and the reel names on the
-open card with the set's. The card is backed up first. If the load fails
+**Load onto card** replaces every reel and the reel names on the open card
+with the set's, and `options.txt` if the set has one. Other files stay. The
+card is backed up first. If the load fails
 partway, the app removes the card's names file rather than leave names on the
 wrong reels, and the message says where the backup is.
 
@@ -29,11 +30,13 @@ you've downloaded:
 
 - Every file is converted to 48 kHz 32-bit float stereo, keeping its markers.
 - Files named `mg1.wav` to `mgw.wav` at the top of the folder keep their
-  slots, and their names from the folder's `mgreel.json` if it has one.
+  slots, and their names from the folder's `mgreel.json` if it has one. If
+  one can't be read, its slot stays empty.
 - The other files, subfolders included, fill the free slots in the order
-  Finder lists them ("Take 2" before "Take 10"). Each file's name becomes its
-  reel's name.
-- A file that can't be read is left out, and the next file takes its slot.
+  Finder lists them ("Take 2" before "Take 10"). Each file's path in the
+  folder, without `.wav`, becomes its reel's name, such as `field/rain`.
+- One of these files that can't be read is left out, and the next file takes
+  its slot.
 - A folder with more than 32 WAV files is refused before anything is written.
 
 The set takes the folder's name, with a number added if that's taken. A report

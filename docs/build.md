@@ -4,8 +4,8 @@
 
 Build joins WAV files into a new reel, one splice each, in the order you list
 them. Add them with **Add files…** or by dropping them anywhere on the page.
-Any sample rate, bit depth, mono or stereo works; the reel is written as 48 kHz
-32-bit float stereo.
+Files can be any sample rate, mono or stereo, in 8, 16, 24 or 32-bit PCM or 32
+or 64-bit float. The reel is written as 48 kHz 32-bit float stereo.
 
 ## The files
 

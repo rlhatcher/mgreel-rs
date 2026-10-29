@@ -16,9 +16,10 @@ that card and shows it the way the module sees it: 32 slots, the colour each
 reel takes in Reel mode, and about where Organize selects it. From there you
 edit splices, build new reels, and keep whole cards as sets.
 
-Everything works on files on your Mac. Before the app changes a file on the
-card it copies the old one to a backups folder, and when a card mounts it
-copies any reel recorded on the module that it hasn't seen yet.
+Everything works on files on your Mac. Before the app changes a reel,
+`options.txt` or the reel names on the card, it copies the old file to a
+backups folder. When a card mounts, it copies any reel recorded on the module
+that it hasn't seen yet.
 
 The repo also builds `mgreel`, a command-line tool that joins WAV files into a
 reel. It started as a Rust port of [Oliver Tonnhofer's
