@@ -5,7 +5,7 @@
 # The Release workflow sets version and sha256 after each release.
 cask "morphagene-reels" do
   version "1.1.0"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "246d61b36a64f5d0e9f2981d848c90e543e61a343fb0416c7e3c019a3533dd05"
 
   url "https://github.com/rlhatcher/mgreel-rs/releases/download/v#{version}/Morphagene-Reels-#{version}-arm64.dmg"
   name "Morphagene Reels"
