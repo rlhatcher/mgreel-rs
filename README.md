@@ -52,9 +52,9 @@ mgreel](https://github.com/olt/mgreel).
 
 **Getting audio in**
 
-- Build a reel from WAV files of any rate, depth or channel count, with trims,
-  normalize and fades. Cue points and region ends saved in the files become
-  splices.
+- Build a reel from mono or stereo WAV files at any sample rate, in 8, 16, 24
+  or 32-bit PCM or 32 or 64-bit float, with trims, normalize and fades. Cue
+  points and region ends saved in the files become splices.
 - Import markers from Audacity labels, a REAPER marker export, an Ableton Live
   set's locators, or another WAV file.
 - Tidy a reel recorded on the module: delete silent splices, trim silent
