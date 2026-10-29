@@ -24,7 +24,8 @@ The repo is a Cargo workspace with a Tauri app:
 
 ## Run and test
 
-You need Rust (stable) and Node 24.
+You need Rust (stable) and Node 24. The screenshot script also needs
+[uv](https://docs.astral.sh/uv/).
 
 ```bash
 cd app
@@ -56,6 +57,7 @@ card in `docs/screenshots/mock.js` standing in for a real one. Start the
 frontend with `npm run dev` in `app/`, then from the repo root:
 
 ```bash
+uv run --no-project --with playwright playwright install webkit  # once
 uv run --no-project --with playwright python -I docs/screenshots/capture.py
 ```
 

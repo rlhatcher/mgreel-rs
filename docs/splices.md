@@ -138,7 +138,7 @@ Undo and redo cover every marker and audio change. The history keeps about
 | + − 0 | Zoom in, out, show all |
 | Shift-click | Pick a run of splices in the list |
 | Cmd-A | Pick every splice |
-| Escape | Drop the pick |
+| Escape | Stop playback and any drag |
 | Cmd-C, X, V, D | Copy, cut, paste, duplicate splices |
 | Shift-Delete | Delete the picked splices |
 | Cmd-Z | Undo; with Shift, redo |

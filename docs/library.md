@@ -68,7 +68,7 @@ each with a fix:
 
 - **Not FAT32.** The module reads only FAT32 cards. Back the card up, format it
   as MS-DOS (FAT) in Disk Utility, then restore the backup.
-- **WAV files it won't load**, because of their name (such as `MG1.WAV` or
+- **WAV files it won't load**, because of their name (such as `mg0.wav` or
   `take 1.wav`) or because they're in a folder. **Put in mgN** converts one
   into the first free slot, with its markers, and backs up and removes the
   original.
@@ -79,8 +79,10 @@ each with a fix:
 
 ## Backups and history
 
-Before the app changes or deletes a file on the card, it copies the old one to
+Before the app changes or deletes a reel, `options.txt` or `mgreel.json` on the
+card, it copies the old one to
 `~/Library/Application Support/com.rlhatcher.mgreel/backups/<card name>/`.
+macOS metadata files are deleted without a copy.
 
 When a card mounts, the app also copies any reel it hasn't seen before, such
 as one you recorded or spliced on the module, before anything can replace it.
@@ -89,8 +91,9 @@ about a card's worth per card.
 
 - **Back up card** copies every reel, `options.txt` and `mgreel.json` into a
   new folder.
-- **Restore…** replaces everything on the card with a backup you pick, after
-  backing up the card as it is.
+- **Restore…** replaces the card's reels and reel names with a backup you
+  pick, and its `options.txt` if the backup has one. Other files stay. The
+  card is backed up first.
 - **History** lists every backup, newest first. Click a file to put that copy
   back on the card.
 - **Show in Finder** opens the card's backups folder.
